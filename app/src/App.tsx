@@ -49,6 +49,8 @@ function App() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "unread">("newest");
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const autoSyncRunningRef = useRef(false);
@@ -70,6 +72,7 @@ function App() {
     deleteCategory,
     createFeed,
     updateFeed,
+    updateFeedFavicon,
     updateFeedCategory,
     fetchFeedArticles,
     deleteFeed,
@@ -160,28 +163,101 @@ function App() {
     return articles.filter((article) => !article.is_read).length;
   }, [articles]);
 
-  const filteredArticles = useMemo(() => {
-    if (selectedFeed) {
-      return articles.filter((article) => article.feed_id === selectedFeed);
+  const selectedFeedTitle = useMemo(() => {
+    if (!selectedArticle) {
+      return null;
     }
-    if (selectedCategory) {
+    return feeds.find((feed) => feed.id === selectedArticle.feed_id)?.title || null;
+  }, [feeds, selectedArticle]);
+
+  const articleTimestamp = useCallback((article: Article) => {
+    if (!article.pub_date) {
+      return 0;
+    }
+    const time = new Date(article.pub_date).getTime();
+    return Number.isNaN(time) ? 0 : time;
+  }, []);
+
+  const estimateReadMinutes = useCallback((text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return 1;
+    }
+    const hasSpaces = /\s/.test(trimmed);
+    const count = hasSpaces ? trimmed.split(/\s+/).length : trimmed.length;
+    const wordsPerMinute = hasSpaces ? 200 : 350;
+    return Math.max(1, Math.round(count / wordsPerMinute));
+  }, []);
+
+  const filteredArticles = useMemo(() => {
+    let list = articles;
+    if (selectedFeed) {
+      list = list.filter((article) => article.feed_id === selectedFeed);
+    } else if (selectedCategory) {
       const feedIds = feeds
         .filter((feed) => feed.category_id === selectedCategory)
         .map((feed) => feed.id);
-      return articles.filter((article) => feedIds.includes(article.feed_id));
+      list = list.filter((article) => feedIds.includes(article.feed_id));
     }
-    return articles;
-  }, [articles, feeds, selectedCategory, selectedFeed]);
 
-  const visibleArticles = useMemo(() => {
     if (filterMode === "unread") {
-      return filteredArticles.filter((article) => !article.is_read);
+      list = list.filter((article) => !article.is_read);
+    } else if (filterMode === "favorites") {
+      list = list.filter((article) => article.is_favorite);
     }
-    if (filterMode === "favorites") {
-      return filteredArticles.filter((article) => article.is_favorite);
+
+    const keyword = searchQuery.trim().toLowerCase();
+    if (keyword) {
+      list = list.filter((article) => {
+        const title = article.title?.toLowerCase() || "";
+        const summary = article.summary?.toLowerCase() || "";
+        const author = article.author?.toLowerCase() || "";
+        return (
+          title.includes(keyword) ||
+          summary.includes(keyword) ||
+          author.includes(keyword)
+        );
+      });
     }
-    return filteredArticles;
-  }, [filteredArticles, filterMode]);
+
+    const sorted = [...list];
+    if (sortMode === "oldest") {
+      sorted.sort((a, b) => articleTimestamp(a) - articleTimestamp(b));
+    } else if (sortMode === "title") {
+      sorted.sort((a, b) => a.title.localeCompare(b.title));
+    } else if (sortMode === "unread") {
+      sorted.sort((a, b) => {
+        if (a.is_read === b.is_read) {
+          return articleTimestamp(b) - articleTimestamp(a);
+        }
+        return a.is_read ? 1 : -1;
+      });
+    } else {
+      sorted.sort((a, b) => articleTimestamp(b) - articleTimestamp(a));
+    }
+
+    return sorted;
+  }, [
+    articles,
+    articleTimestamp,
+    feeds,
+    filterMode,
+    searchQuery,
+    selectedCategory,
+    selectedFeed,
+    sortMode,
+  ]);
+
+  const visibleArticles = filteredArticles;
+
+  const readMinutes = useMemo(() => {
+    if (!selectedArticle) {
+      return null;
+    }
+    const source = contentHtml || selectedArticle.summary || "";
+    const plain = source.replace(/<[^>]*>/g, " ");
+    return estimateReadMinutes(plain);
+  }, [contentHtml, estimateReadMinutes, selectedArticle]);
 
   const handleAddSampleData = async () => {
     try {
@@ -463,6 +539,20 @@ function App() {
     setIsFocusMode((value) => !value);
   };
 
+  const deriveFaviconUrl = useCallback((feed: (typeof feeds)[number]) => {
+    const candidate = feed.site_url || feed.url;
+    if (!candidate) {
+      return null;
+    }
+
+    try {
+      const url = new URL(candidate);
+      return `${url.origin}/favicon.ico`;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const buildContentHtml = useCallback((html: string) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
@@ -562,6 +652,21 @@ function App() {
       container.removeEventListener("scroll", handleScroll);
     };
   }, [selectedArticle, updateArticleProgress]);
+
+  useEffect(() => {
+    const pending = feeds.filter((feed) => !feed.favicon_url);
+    if (pending.length === 0) {
+      return;
+    }
+
+    pending.forEach((feed) => {
+      const faviconUrl = deriveFaviconUrl(feed);
+      if (!faviconUrl) {
+        return;
+      }
+      updateFeedFavicon(feed.id, faviconUrl);
+    });
+  }, [deriveFaviconUrl, feeds, updateFeedFavicon]);
 
   const handleDeleteFeed = async (feedId: string) => {
     const ok = await deleteFeed(feedId);
@@ -816,7 +921,7 @@ function App() {
                           <div className="flex items-center justify-between gap-2">
                             <button
                               type="button"
-                              className="flex-1 text-left truncate"
+                              className="flex-1 text-left"
                               onClick={() => {
                                 setSelectedFeed(feed.id);
                                 setSelectedCategory(null);
@@ -824,7 +929,21 @@ function App() {
                               }}
                               data-tauri-drag-region={false}
                             >
-                              {feed.title}
+                              <span className="flex items-center gap-2">
+                                {feed.favicon_url ? (
+                                  <img
+                                    src={feed.favicon_url}
+                                    alt=""
+                                    className="h-4 w-4 rounded-sm"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <span className="h-4 w-4 rounded-sm bg-muted text-[10px] text-muted-foreground flex items-center justify-center">
+                                    {feed.title.slice(0, 1)}
+                                  </span>
+                                )}
+                                <span className="truncate">{feed.title}</span>
+                              </span>
                             </button>
                             <div className="flex items-center gap-2 text-xs text-muted-foreground">
                               {unreadCounts.get(feed.id) ? (
@@ -916,7 +1035,7 @@ function App() {
                         <div className="flex items-center justify-between gap-2">
                           <button
                             type="button"
-                            className="flex-1 text-left truncate"
+                            className="flex-1 text-left"
                             onClick={() => {
                               setSelectedFeed(feed.id);
                               setSelectedCategory(null);
@@ -924,7 +1043,21 @@ function App() {
                             }}
                             data-tauri-drag-region={false}
                           >
-                            {feed.title}
+                            <span className="flex items-center gap-2">
+                              {feed.favicon_url ? (
+                                <img
+                                  src={feed.favicon_url}
+                                  alt=""
+                                  className="h-4 w-4 rounded-sm"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <span className="h-4 w-4 rounded-sm bg-muted text-[10px] text-muted-foreground flex items-center justify-center">
+                                  {feed.title.slice(0, 1)}
+                                </span>
+                              )}
+                              <span className="truncate">{feed.title}</span>
+                            </span>
                           </button>
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
                             {unreadCounts.get(feed.id) ? (
@@ -1029,6 +1162,8 @@ function App() {
               <input
                 type="text"
                 placeholder="搜索文章..."
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
                 className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 data-tauri-drag-region={false}
               />
@@ -1049,6 +1184,23 @@ function App() {
               >
                 {syncLoading ? "抓取中" : "抓取"}
               </Button>
+            </div>
+            <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border flex items-center justify-between gap-2">
+              <span>
+                {visibleArticles.length} 篇
+                {filterMode === "unread" ? " · 未读" : filterMode === "favorites" ? " · 收藏" : ""}
+              </span>
+              <select
+                className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                value={sortMode}
+                onChange={(event) => setSortMode(event.target.value as typeof sortMode)}
+                data-tauri-drag-region={false}
+              >
+                <option value="newest">最新优先</option>
+                <option value="oldest">最早优先</option>
+                <option value="unread">未读优先</option>
+                <option value="title">标题排序</option>
+              </select>
             </div>
             {syncStatus && (
               <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
@@ -1201,6 +1353,18 @@ function App() {
                     ? new Date(selectedArticle.pub_date).toLocaleString()
                     : ""}
                 </span>
+                {selectedFeedTitle && (
+                  <>
+                    <span>•</span>
+                    <span>{selectedFeedTitle}</span>
+                  </>
+                )}
+                {readMinutes !== null && (
+                  <>
+                    <span>•</span>
+                    <span>约 {readMinutes} 分钟</span>
+                  </>
+                )}
               </div>
               {contentLoading ? (
                 <div className="text-sm text-muted-foreground">正在加载全文...</div>

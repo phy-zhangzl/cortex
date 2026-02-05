@@ -59,6 +59,7 @@ interface DataState {
     description?: string | null;
     categoryId?: string | null;
   }) => Promise<Feed | null>;
+  updateFeedFavicon: (feedId: string, faviconUrl: string | null) => Promise<Feed | null>;
   updateFeedCategory: (feedId: string, categoryId: string | null) => Promise<Feed | null>;
   fetchFeedArticles: (feedId: string) => Promise<number | null>;
   deleteFeed: (feedId: string) => Promise<boolean>;
@@ -156,6 +157,19 @@ export const useDataStore = create<DataState>((set, get) => ({
         siteUrl: siteUrl ?? null,
         description: description ?? null,
         categoryId: categoryId ?? null,
+      });
+      set({ feeds: get().feeds.map((item) => (item.id === feedId ? feed : item)) });
+      return feed;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+  updateFeedFavicon: async (feedId, faviconUrl) => {
+    try {
+      const feed = await invoke<Feed>("update_feed_favicon", {
+        feedId,
+        faviconUrl,
       });
       set({ feeds: get().feeds.map((item) => (item.id === feedId ? feed : item)) });
       return feed;

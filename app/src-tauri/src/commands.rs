@@ -242,6 +242,32 @@ pub async fn update_feed_category(
 }
 
 #[tauri::command]
+pub async fn update_feed_favicon(
+    state: State<'_, AppState>,
+    feed_id: String,
+    favicon_url: Option<String>,
+) -> Result<Feed, String> {
+    let now = Utc::now();
+    sqlx::query("UPDATE feeds SET favicon_url = ?, updated_at = ? WHERE id = ?")
+        .bind(&favicon_url)
+        .bind(now)
+        .bind(&feed_id)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let updated = sqlx::query_as::<_, Feed>(
+        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+    )
+    .bind(&feed_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(updated)
+}
+
+#[tauri::command]
 pub async fn delete_feed(state: State<'_, AppState>, feed_id: String) -> Result<(), String> {
     sqlx::query("DELETE FROM feeds WHERE id = ?")
         .bind(&feed_id)
