@@ -46,6 +46,7 @@ pub fn run() {
             commands::delete_category,
             commands::list_feeds,
             commands::create_feed,
+            commands::update_feed,
             commands::update_feed_category,
             commands::delete_feed,
             commands::list_articles,

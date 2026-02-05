@@ -51,6 +51,14 @@ interface DataState {
     description?: string | null;
     categoryId?: string | null;
   }) => Promise<Feed | null>;
+  updateFeed: (payload: {
+    feedId: string;
+    title: string;
+    url: string;
+    siteUrl?: string | null;
+    description?: string | null;
+    categoryId?: string | null;
+  }) => Promise<Feed | null>;
   updateFeedCategory: (feedId: string, categoryId: string | null) => Promise<Feed | null>;
   fetchFeedArticles: (feedId: string) => Promise<number | null>;
   deleteFeed: (feedId: string) => Promise<boolean>;
@@ -133,6 +141,23 @@ export const useDataStore = create<DataState>((set, get) => ({
         categoryId: categoryId ?? null,
       });
       set({ feeds: [feed, ...get().feeds] });
+      return feed;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+  updateFeed: async ({ feedId, title, url, siteUrl, description, categoryId }) => {
+    try {
+      const feed = await invoke<Feed>("update_feed", {
+        feedId,
+        title,
+        url,
+        siteUrl: siteUrl ?? null,
+        description: description ?? null,
+        categoryId: categoryId ?? null,
+      });
+      set({ feeds: get().feeds.map((item) => (item.id === feedId ? feed : item)) });
       return feed;
     } catch (error) {
       set({ error: String(error) });

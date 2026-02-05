@@ -168,6 +168,54 @@ pub async fn create_feed(
 }
 
 #[tauri::command]
+pub async fn update_feed(
+    state: State<'_, AppState>,
+    feed_id: String,
+    title: String,
+    url: String,
+    site_url: Option<String>,
+    description: Option<String>,
+    category_id: Option<String>,
+) -> Result<Feed, String> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT id FROM feeds WHERE url = ? AND id != ? LIMIT 1")
+            .bind(&url)
+            .bind(&feed_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    if existing.is_some() {
+        return Err("订阅源已存在".to_string());
+    }
+
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE feeds SET title = ?, url = ?, site_url = ?, description = ?, category_id = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&title)
+    .bind(&url)
+    .bind(&site_url)
+    .bind(&description)
+    .bind(&category_id)
+    .bind(now)
+    .bind(&feed_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let updated = sqlx::query_as::<_, Feed>(
+        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+    )
+    .bind(&feed_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(updated)
+}
+
+#[tauri::command]
 pub async fn update_feed_category(
     state: State<'_, AppState>,
     feed_id: String,

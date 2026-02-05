@@ -21,11 +21,35 @@ function App() {
   const [feedUrl, setFeedUrl] = useState("");
   const [feedSiteUrl, setFeedSiteUrl] = useState("");
   const [feedCategoryId, setFeedCategoryId] = useState<string | null>(null);
+  const [editingFeedId, setEditingFeedId] = useState<string | null>(null);
+  const [confirmDeleteFeedId, setConfirmDeleteFeedId] = useState<string | null>(null);
   const [newCategoryName, setNewCategoryName] = useState("");
+  const [allFeedsCollapsed, setAllFeedsCollapsed] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    try {
+      return localStorage.getItem("cortex:all-feeds-collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+  const [readerFontSize, setReaderFontSize] = useState(() => {
+    if (typeof window === "undefined") {
+      return 18;
+    }
+    try {
+      const stored = Number(localStorage.getItem("cortex:reader-font-size"));
+      return Number.isFinite(stored) && stored > 0 ? stored : 18;
+    } catch {
+      return 18;
+    }
+  });
   const [selectedFeedCategoryId, setSelectedFeedCategoryId] = useState<string | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
+  const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const autoSyncRunningRef = useRef(false);
   const [contentLoading, setContentLoading] = useState(false);
@@ -45,6 +69,7 @@ function App() {
     createCategory,
     deleteCategory,
     createFeed,
+    updateFeed,
     updateFeedCategory,
     fetchFeedArticles,
     deleteFeed,
@@ -90,15 +115,27 @@ function App() {
   }, [isDarkMode]);
 
   useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+    try {
+      localStorage.setItem(
+        "cortex:all-feeds-collapsed",
+        allFeedsCollapsed ? "true" : "false"
+      );
+    } catch {
+      // ignore
+    }
+  }, [allFeedsCollapsed]);
 
   useEffect(() => {
-    if (!selectedFeed && feeds.length > 0) {
-      setSelectedFeed(feeds[0].id);
-      setSelectedCategory(null);
+    try {
+      localStorage.setItem("cortex:reader-font-size", String(readerFontSize));
+    } catch {
+      // ignore
     }
-  }, [feeds, selectedFeed]);
+  }, [readerFontSize]);
+
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
   useEffect(() => {
     if (!selectedFeed) {
@@ -183,7 +220,49 @@ function App() {
     }
   };
 
-  const handleCreateFeed = async () => {
+  const resetFeedForm = () => {
+    setFeedTitle("");
+    setFeedUrl("");
+    setFeedSiteUrl("");
+    setFeedCategoryId(null);
+    setEditingFeedId(null);
+  };
+
+  const openCreateFeedForm = () => {
+    resetFeedForm();
+    setSeedStatus(null);
+    setShowAddForm(true);
+  };
+
+  const closeFeedForm = () => {
+    setShowAddForm(false);
+    resetFeedForm();
+  };
+
+  const handleToggleAddForm = () => {
+    if (showAddForm) {
+      closeFeedForm();
+      return;
+    }
+    openCreateFeedForm();
+  };
+
+  const handleStartEditFeed = (feed: (typeof feeds)[number]) => {
+    setShowAddForm(true);
+    setEditingFeedId(feed.id);
+    setFeedTitle(feed.title);
+    setFeedUrl(feed.url);
+    setFeedSiteUrl(feed.site_url ?? "");
+    setFeedCategoryId(feed.category_id ?? null);
+    setSeedStatus(null);
+    setConfirmDeleteFeedId(null);
+  };
+
+  const handleRequestDeleteFeed = (feedId: string) => {
+    setConfirmDeleteFeedId(feedId);
+  };
+
+  const handleSaveFeed = async () => {
     if (!feedTitle.trim() || !feedUrl.trim()) {
       setSeedStatus("请填写标题和 RSS 地址");
       return;
@@ -208,7 +287,7 @@ function App() {
 
     try {
       setSeedLoading(true);
-      setSeedStatus("正在保存订阅源...");
+      setSeedStatus(editingFeedId ? "正在更新订阅源..." : "正在保存订阅源...");
 
       const existingCategory = categories[0];
       const category =
@@ -219,28 +298,36 @@ function App() {
         return;
       }
 
-      const feed = await createFeed({
-        title: feedTitle.trim(),
-        url: urlText,
-        siteUrl: feedSiteUrl.trim() || null,
-        description: null,
-        categoryId: feedCategoryId ?? category.id,
-      });
+      const feed = editingFeedId
+        ? await updateFeed({
+            feedId: editingFeedId,
+            title: feedTitle.trim(),
+            url: urlText,
+            siteUrl: feedSiteUrl.trim() || null,
+            description: null,
+            categoryId: feedCategoryId ?? category.id,
+          })
+        : await createFeed({
+            title: feedTitle.trim(),
+            url: urlText,
+            siteUrl: feedSiteUrl.trim() || null,
+            description: null,
+            categoryId: feedCategoryId ?? category.id,
+          });
 
       if (!feed) {
-        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
+        setSeedStatus(
+          useDataStore.getState().error ||
+            (editingFeedId ? "更新订阅源失败" : "写入订阅源失败")
+        );
         return;
       }
 
       await loadAll();
-      setSeedStatus("订阅源已保存");
-      setShowAddForm(false);
-      setFeedTitle("");
-      setFeedUrl("");
-      setFeedSiteUrl("");
-      setFeedCategoryId(null);
+      setSeedStatus(editingFeedId ? "订阅源已更新" : "订阅源已保存");
+      closeFeedForm();
     } catch (error) {
-      console.error("Create feed failed", error);
+      console.error("Save feed failed", error);
       setSeedStatus(`失败: ${String(error)}`);
     } finally {
       setSeedLoading(false);
@@ -364,6 +451,18 @@ function App() {
     );
   };
 
+  const handleDecreaseFont = () => {
+    setReaderFontSize((value) => Math.max(14, value - 1));
+  };
+
+  const handleIncreaseFont = () => {
+    setReaderFontSize((value) => Math.min(24, value + 1));
+  };
+
+  const handleToggleFocusMode = () => {
+    setIsFocusMode((value) => !value);
+  };
+
   const buildContentHtml = useCallback((html: string) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
@@ -465,13 +564,10 @@ function App() {
   }, [selectedArticle, updateArticleProgress]);
 
   const handleDeleteFeed = async (feedId: string) => {
-    if (!confirm("确定要删除该订阅源吗？")) {
-      return;
-    }
-
     const ok = await deleteFeed(feedId);
     if (!ok) {
       setSeedStatus(useDataStore.getState().error || "删除失败");
+      setConfirmDeleteFeedId(null);
       return;
     }
 
@@ -479,6 +575,8 @@ function App() {
       setSelectedFeed(null);
       setSelectedArticle(null);
     }
+    setConfirmDeleteFeedId(null);
+    setSeedStatus("订阅源已删除");
   };
 
   return (
@@ -489,429 +587,608 @@ function App() {
       tabIndex={-1}
       onKeyDown={() => {}}
     >
-      {/* Left Sidebar: Categories & Feeds */}
-      <aside className="w-[240px] min-w-[240px] border-r border-border bg-card flex flex-col overflow-x-hidden">
-        {/* Header */}
-        <div className="h-12 flex items-center gap-2 border-b border-border px-3 pl-16 pt-3">
-          <h1 className="text-lg font-bold">Cortex</h1>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="ml-auto h-8 w-8"
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            data-tauri-drag-region={false}
-          >
-            {isDarkMode ? "☀️" : "🌙"}
-          </Button>
-        </div>
-
-        {/* Add Feed Button */}
-        <div className="p-2" data-tauri-drag-region={false}>
-          <Button
-            className="w-full h-auto py-2.5 text-sm leading-5 whitespace-normal"
-            size="default"
-            data-tauri-drag-region={false}
-            onClick={() => setShowAddForm((value) => !value)}
-            disabled={seedLoading}
-          >
-            {showAddForm ? "收起" : "+ 添加订阅源"}
-          </Button>
-          {showAddForm && (
-            <div className="mt-3 space-y-2 text-xs">
-              <input
-                type="text"
-                placeholder="订阅名称"
-                value={feedTitle}
-                onChange={(event) => setFeedTitle(event.target.value)}
-                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
-                data-tauri-drag-region={false}
-              />
-              <input
-                type="text"
-                placeholder="RSS 地址 (必填)"
-                value={feedUrl}
-                onChange={(event) => setFeedUrl(event.target.value)}
-                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
-                data-tauri-drag-region={false}
-              />
-              <input
-                type="text"
-                placeholder="站点地址 (可选)"
-                value={feedSiteUrl}
-                onChange={(event) => setFeedSiteUrl(event.target.value)}
-                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
-                data-tauri-drag-region={false}
-              />
-              <select
-                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
-                value={feedCategoryId || ""}
-                onChange={(event) => setFeedCategoryId(event.target.value || null)}
-                data-tauri-drag-region={false}
-              >
-                <option value="">未分类</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-              <div className="flex gap-2">
-                <Button
-                  className="flex-1"
-                  size="sm"
-                  data-tauri-drag-region={false}
-                  onClick={handleCreateFeed}
-                  disabled={seedLoading}
-                >
-                  保存
-                </Button>
-                <Button
-                  className="flex-1"
-                  size="sm"
-                  variant="ghost"
-                  data-tauri-drag-region={false}
-                  onClick={() => setShowAddForm(false)}
-                >
-                  取消
-                </Button>
-              </div>
-            </div>
-          )}
-          {seedStatus && (
-            <div className="mt-2 text-xs text-muted-foreground">
-              {seedStatus}
-            </div>
-          )}
-          <button
-            type="button"
-            className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
-            onClick={handleAddSampleData}
-            data-tauri-drag-region={false}
-          >
-            快速添加示例订阅
-          </button>
-        </div>
-        <div className="px-3 pb-3">
-          <div className="text-[11px] font-semibold text-muted-foreground tracking-wider mb-2">
-            分类管理
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              placeholder="新分类名称"
-              value={newCategoryName}
-              onChange={(event) => setNewCategoryName(event.target.value)}
-              className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-ring"
-              data-tauri-drag-region={false}
-            />
-            <Button
-              size="sm"
-              className="px-3 h-8 text-[11px] shrink-0"
-              data-tauri-drag-region={false}
-              onClick={handleCreateCategory}
-            >
-              添加
-            </Button>
-          </div>
-        </div>
-
-        {/* Categories & Feeds List */}
-        <div className="flex-1 overflow-y-auto">
-          {/* All Items */}
-          <div className="px-3 py-1">
-            <button
-              type="button"
-              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                selectedCategory === null && selectedFeed === null
-                  ? "bg-accent text-accent-foreground"
-                  : "hover:bg-accent/50"
-              }`}
-              onClick={() => {
-                setSelectedCategory(null);
-                setSelectedFeed(null);
-              }}
-              data-tauri-drag-region={false}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate">全部文章</span>
-                {totalUnread > 0 && (
-                  <span className="text-xs bg-primary text-primary-foreground px-2 py-0.5 rounded-full">
-                    {totalUnread}
-                  </span>
-                )}
-              </div>
-            </button>
-          </div>
-          <div className="px-3 py-1">
-            <button
-              type="button"
-              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                filterMode === "unread"
-                  ? "bg-accent text-accent-foreground"
-                  : "hover:bg-accent/50"
-              }`}
-              onClick={() => {
-                setFilterMode("unread");
-                setSelectedCategory(null);
-                setSelectedFeed(null);
-              }}
-              data-tauri-drag-region={false}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate">未读</span>
-                {totalUnread > 0 && (
-                  <span className="text-xs text-muted-foreground">{totalUnread}</span>
-                )}
-              </div>
-            </button>
-          </div>
-          <div className="px-3 py-1">
-            <button
-              type="button"
-              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                filterMode === "favorites"
-                  ? "bg-accent text-accent-foreground"
-                  : "hover:bg-accent/50"
-              }`}
-              onClick={() => {
-                setFilterMode("favorites");
-                setSelectedCategory(null);
-                setSelectedFeed(null);
-              }}
-              data-tauri-drag-region={false}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate">收藏</span>
-              </div>
-            </button>
-          </div>
-
-          {/* Categories */}
-          {categories.map((category) => (
-            <div key={category.id} className="px-3 py-1">
-              <div className="px-3 py-0.5 text-[10px] font-semibold text-muted-foreground tracking-wide flex items-center justify-between gap-2 leading-tight">
-                <span className="truncate" title={category.name}>
-                  {category.name}
-                </span>
-                <button
-                  type="button"
-                  className="text-xs text-muted-foreground hover:text-destructive"
-                  onClick={() => handleDeleteCategory(category.id)}
-                  data-tauri-drag-region={false}
-                  aria-label="删除分类"
-                  title="删除分类"
-                >
-                  ✕
-                </button>
-              </div>
-              {/* Feeds under this category */}
-              {feeds
-                .filter((feed) => feed.category_id === category.id)
-                .map((feed) => (
-                  <button
-                    type="button"
-                    key={feed.id}
-                    className={`group w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
-                      selectedFeed === feed.id
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/50"
-                    }`}
-                    onClick={() => {
-                      setSelectedFeed(feed.id);
-                      setSelectedCategory(null);
-                    }}
-                    data-tauri-drag-region={false}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate">{feed.title}</span>
-                      {unreadCounts.get(feed.id) ? (
-                        <span className="text-xs text-muted-foreground">
-                          {unreadCounts.get(feed.id)}
-                        </span>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="text-xs text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleDeleteFeed(feed.id);
-                        }}
-                        data-tauri-drag-region={false}
-                        aria-label="删除订阅源"
-                        title="删除订阅源"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </button>
-                ))}
-            </div>
-          ))}
-        </div>
-        {selectedFeed && (
-          <div className="border-t border-border p-3">
-            <div className="text-xs text-muted-foreground mb-2">订阅源分类</div>
-            <div className="flex gap-2">
-              <select
-                className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                value={selectedFeedCategoryId ?? ""}
-                onChange={(event) =>
-                  setSelectedFeedCategoryId(event.target.value || null)
-                }
-                data-tauri-drag-region={false}
-              >
-                <option value="">未分类</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
+      {!isFocusMode && (
+        <>
+          {/* Left Sidebar: Categories & Feeds */}
+          <aside className="w-[240px] min-w-[240px] border-r border-border bg-card flex flex-col overflow-x-hidden">
+            {/* Header */}
+            <div className="h-12 flex items-center gap-2 border-b border-border px-3 pl-16 pt-3">
+              <h1 className="text-lg font-bold">Cortex</h1>
               <Button
-                size="sm"
+                variant="ghost"
+                size="icon"
+                className="ml-auto h-8 w-8"
+                onClick={() => setIsDarkMode(!isDarkMode)}
                 data-tauri-drag-region={false}
-                onClick={handleUpdateSelectedFeedCategory}
               >
-                保存
+                {isDarkMode ? "☀️" : "🌙"}
               </Button>
             </div>
-          </div>
-        )}
-        <div className="border-t border-border p-3">
-          <Button
-            variant={autoSyncEnabled ? "secondary" : "ghost"}
-            size="sm"
-            className="w-full"
-            data-tauri-drag-region={false}
-            onClick={() => setAutoSyncEnabled((value) => !value)}
-          >
-            {autoSyncEnabled ? "自动同步：开" : "自动同步：关"}
-          </Button>
-        </div>
-      </aside>
 
-      {/* Middle: Article List */}
-      <div className="w-[320px] min-w-[320px] border-r border-border bg-card flex flex-col">
-        {/* Search Bar */}
-        <div className="h-14 flex items-center px-4 border-b border-border gap-2">
-          <input
-            type="text"
-            placeholder="搜索文章..."
-            className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-            data-tauri-drag-region={false}
-          />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            data-tauri-drag-region={false}
-          >
-            🔍
-          </Button>
-          <Button
-            size="sm"
-            className="ml-2"
-            data-tauri-drag-region={false}
-            onClick={handleSyncFeed}
-            disabled={syncLoading || !selectedFeed}
-          >
-            {syncLoading ? "抓取中" : "抓取"}
-          </Button>
-        </div>
-        {syncStatus && (
-          <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
-            {syncStatus}
-          </div>
-        )}
-
-        {/* Article List */}
-        <div className="flex-1 overflow-y-auto">
-          {visibleArticles.map((article) => (
-            <button
-              type="button"
-              key={article.id}
-              className={`w-full text-left p-4 border-b border-border transition-colors ${
-                selectedArticle?.id === article.id
-                  ? "bg-accent"
-                  : "hover:bg-accent/50"
-              } ${article.is_read ? "opacity-60" : ""}`}
-              onClick={() => setSelectedArticle(article)}
-              data-tauri-drag-region={false}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <h3 className={`text-sm ${article.is_read ? "font-normal" : "font-semibold"} line-clamp-2`}>
-                  {article.title}
-                </h3>
-                  {article.is_favorite && <span>⭐</span>}
+            {/* Add Feed Button */}
+            <div className="p-2" data-tauri-drag-region={false}>
+              <Button
+                className="w-full h-auto py-2.5 text-sm leading-5 whitespace-normal"
+                size="default"
+                data-tauri-drag-region={false}
+                onClick={handleToggleAddForm}
+                disabled={seedLoading}
+              >
+                {showAddForm ? (editingFeedId ? "收起编辑" : "收起") : "+ 添加订阅源"}
+              </Button>
+              {showAddForm && (
+                <div className="mt-3 space-y-2 text-xs">
+                  <input
+                    type="text"
+                    placeholder="订阅名称"
+                    value={feedTitle}
+                    onChange={(event) => setFeedTitle(event.target.value)}
+                    className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                    data-tauri-drag-region={false}
+                  />
+                  <input
+                    type="text"
+                    placeholder="RSS 地址 (必填)"
+                    value={feedUrl}
+                    onChange={(event) => setFeedUrl(event.target.value)}
+                    className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                    data-tauri-drag-region={false}
+                  />
+                  <input
+                    type="text"
+                    placeholder="站点地址 (可选)"
+                    value={feedSiteUrl}
+                    onChange={(event) => setFeedSiteUrl(event.target.value)}
+                    className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                    data-tauri-drag-region={false}
+                  />
+                  <select
+                    className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={feedCategoryId || ""}
+                    onChange={(event) => setFeedCategoryId(event.target.value || null)}
+                    data-tauri-drag-region={false}
+                  >
+                    <option value="">未分类</option>
+                    {categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="flex gap-2">
+                    <Button
+                      className="flex-1"
+                      size="sm"
+                      data-tauri-drag-region={false}
+                      onClick={handleSaveFeed}
+                      disabled={seedLoading}
+                    >
+                      {editingFeedId ? "保存修改" : "保存"}
+                    </Button>
+                    <Button
+                      className="flex-1"
+                      size="sm"
+                      variant="ghost"
+                      data-tauri-drag-region={false}
+                      onClick={closeFeedForm}
+                    >
+                      取消
+                    </Button>
+                  </div>
                 </div>
-              <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                {article.summary || ""}
-              </p>
-              <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
-                <span>{article.author || "Unknown"}</span>
-                <span>
-                  {article.pub_date ? new Date(article.pub_date).toLocaleDateString() : ""}
-                </span>
-              </div>
-            </button>
-          ))}
-          {!loading && visibleArticles.length === 0 && (
-            <div className="p-6 text-sm text-muted-foreground">
-              暂无文章，先添加一个订阅源。
+              )}
+              {seedStatus && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {seedStatus}
+                </div>
+              )}
+              <button
+                type="button"
+                className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={handleAddSampleData}
+                data-tauri-drag-region={false}
+              >
+                快速添加示例订阅
+              </button>
             </div>
-          )}
-        </div>
-      </div>
+            <div className="px-3 pb-3">
+              <div className="text-[11px] font-semibold text-muted-foreground tracking-wider mb-2">
+                分类管理
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="新分类名称"
+                  value={newCategoryName}
+                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-ring"
+                  data-tauri-drag-region={false}
+                />
+                <Button
+                  size="sm"
+                  className="px-3 h-8 text-[11px] shrink-0"
+                  data-tauri-drag-region={false}
+                  onClick={handleCreateCategory}
+                >
+                  添加
+                </Button>
+              </div>
+            </div>
+
+            {/* Categories & Feeds List */}
+            <div className="flex-1 overflow-y-auto">
+              {/* All Items */}
+              <div className="px-3 py-1">
+                <button
+                  type="button"
+                  className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    selectedCategory === null && selectedFeed === null
+                      ? "bg-accent text-accent-foreground"
+                      : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => {
+                    setFilterMode("all");
+                    setSelectedCategory(null);
+                    setSelectedFeed(null);
+                  }}
+                  data-tauri-drag-region={false}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">全部文章</span>
+                    {totalUnread > 0 && (
+                      <span className="text-xs bg-primary text-primary-foreground px-2 py-0.5 rounded-full">
+                        {totalUnread}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              </div>
+              <div className="px-3 py-1">
+                <button
+                  type="button"
+                  className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    filterMode === "unread"
+                      ? "bg-accent text-accent-foreground"
+                      : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => {
+                    setFilterMode("unread");
+                    setSelectedCategory(null);
+                    setSelectedFeed(null);
+                  }}
+                  data-tauri-drag-region={false}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">未读</span>
+                    {totalUnread > 0 && (
+                      <span className="text-xs text-muted-foreground">{totalUnread}</span>
+                    )}
+                  </div>
+                </button>
+              </div>
+              <div className="px-3 py-1">
+                <button
+                  type="button"
+                  className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    filterMode === "favorites"
+                      ? "bg-accent text-accent-foreground"
+                      : "hover:bg-accent/50"
+                  }`}
+                  onClick={() => {
+                    setFilterMode("favorites");
+                    setSelectedCategory(null);
+                    setSelectedFeed(null);
+                  }}
+                  data-tauri-drag-region={false}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">收藏</span>
+                  </div>
+                </button>
+              </div>
+
+              {/* All Feeds */}
+              <div className="px-3 py-2">
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-between text-[10px] font-semibold text-muted-foreground tracking-wide mb-1"
+                  onClick={() => setAllFeedsCollapsed((value) => !value)}
+                  data-tauri-drag-region={false}
+                >
+                  <span>全部订阅源</span>
+                  <span className="text-xs">{allFeedsCollapsed ? "▶" : "▼"}</span>
+                </button>
+                {!allFeedsCollapsed && (
+                  <div className="space-y-1">
+                    {feeds.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">暂无订阅源</div>
+                    ) : (
+                      feeds.map((feed) => (
+                        <div
+                          key={`all-${feed.id}`}
+                          className={`group w-full px-3 py-2 rounded-md text-sm transition-colors ${
+                            selectedFeed === feed.id
+                              ? "bg-accent text-accent-foreground"
+                              : "hover:bg-accent/50"
+                          }`}
+                          data-tauri-drag-region={false}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              className="flex-1 text-left truncate"
+                              onClick={() => {
+                                setSelectedFeed(feed.id);
+                                setSelectedCategory(null);
+                                setConfirmDeleteFeedId(null);
+                              }}
+                              data-tauri-drag-region={false}
+                            >
+                              {feed.title}
+                            </button>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              {unreadCounts.get(feed.id) ? (
+                                <span>{unreadCounts.get(feed.id)}</span>
+                              ) : null}
+                              {confirmDeleteFeedId === feed.id ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="text-destructive"
+                                    onClick={() => handleDeleteFeed(feed.id)}
+                                    data-tauri-drag-region={false}
+                                  >
+                                    确认
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="hover:text-foreground"
+                                    onClick={() => setConfirmDeleteFeedId(null)}
+                                    data-tauri-drag-region={false}
+                                  >
+                                    取消
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                                    onClick={() => handleStartEditFeed(feed)}
+                                    data-tauri-drag-region={false}
+                                    aria-label="编辑订阅源"
+                                    title="编辑订阅源"
+                                  >
+                                    编辑
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                    onClick={() => handleRequestDeleteFeed(feed.id)}
+                                    data-tauri-drag-region={false}
+                                    aria-label="删除订阅源"
+                                    title="删除订阅源"
+                                  >
+                                    ✕
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Categories */}
+              {categories.map((category) => (
+                <div key={category.id} className="px-3 py-1">
+                  <div className="px-3 py-0.5 text-[10px] font-semibold text-muted-foreground tracking-wide flex items-center justify-between gap-2 leading-tight">
+                    <span className="truncate" title={category.name}>
+                      {category.name}
+                    </span>
+                    <button
+                      type="button"
+                      className="text-xs text-muted-foreground hover:text-destructive"
+                      onClick={() => handleDeleteCategory(category.id)}
+                      data-tauri-drag-region={false}
+                      aria-label="删除分类"
+                      title="删除分类"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {/* Feeds under this category */}
+                  {feeds
+                    .filter((feed) => feed.category_id === category.id)
+                    .map((feed) => (
+                      <div
+                        key={feed.id}
+                        className={`group w-full px-3 py-2 rounded-md text-sm transition-colors ${
+                          selectedFeed === feed.id
+                            ? "bg-accent text-accent-foreground"
+                            : "hover:bg-accent/50"
+                        }`}
+                        data-tauri-drag-region={false}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            className="flex-1 text-left truncate"
+                            onClick={() => {
+                              setSelectedFeed(feed.id);
+                              setSelectedCategory(null);
+                              setConfirmDeleteFeedId(null);
+                            }}
+                            data-tauri-drag-region={false}
+                          >
+                            {feed.title}
+                          </button>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            {unreadCounts.get(feed.id) ? (
+                              <span>{unreadCounts.get(feed.id)}</span>
+                            ) : null}
+                            {confirmDeleteFeedId === feed.id ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="text-destructive"
+                                  onClick={() => handleDeleteFeed(feed.id)}
+                                  data-tauri-drag-region={false}
+                                >
+                                  确认
+                                </button>
+                                <button
+                                  type="button"
+                                  className="hover:text-foreground"
+                                  onClick={() => setConfirmDeleteFeedId(null)}
+                                  data-tauri-drag-region={false}
+                                >
+                                  取消
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  className="hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                                  onClick={() => handleStartEditFeed(feed)}
+                                  data-tauri-drag-region={false}
+                                  aria-label="编辑订阅源"
+                                  title="编辑订阅源"
+                                >
+                                  编辑
+                                </button>
+                                <button
+                                  type="button"
+                                  className="hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                  onClick={() => handleRequestDeleteFeed(feed.id)}
+                                  data-tauri-drag-region={false}
+                                  aria-label="删除订阅源"
+                                  title="删除订阅源"
+                                >
+                                  ✕
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              ))}
+            </div>
+            {selectedFeed && (
+              <div className="border-t border-border p-3">
+                <div className="text-xs text-muted-foreground mb-2">订阅源分类</div>
+                <div className="flex gap-2">
+                  <select
+                    className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={selectedFeedCategoryId ?? ""}
+                    onChange={(event) =>
+                      setSelectedFeedCategoryId(event.target.value || null)
+                    }
+                    data-tauri-drag-region={false}
+                  >
+                    <option value="">未分类</option>
+                    {categories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm"
+                    data-tauri-drag-region={false}
+                    onClick={handleUpdateSelectedFeedCategory}
+                  >
+                    保存
+                  </Button>
+                </div>
+              </div>
+            )}
+            <div className="border-t border-border p-3">
+              <Button
+                variant={autoSyncEnabled ? "secondary" : "ghost"}
+                size="sm"
+                className="w-full"
+                data-tauri-drag-region={false}
+                onClick={() => setAutoSyncEnabled((value) => !value)}
+              >
+                {autoSyncEnabled ? "自动同步：开" : "自动同步：关"}
+              </Button>
+            </div>
+          </aside>
+
+          {/* Middle: Article List */}
+          <div className="w-[320px] min-w-[320px] border-r border-border bg-card flex flex-col">
+            {/* Search Bar */}
+            <div className="h-14 flex items-center px-4 border-b border-border gap-2">
+              <input
+                type="text"
+                placeholder="搜索文章..."
+                className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                data-tauri-drag-region={false}
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                data-tauri-drag-region={false}
+              >
+                🔍
+              </Button>
+              <Button
+                size="sm"
+                className="ml-2"
+                data-tauri-drag-region={false}
+                onClick={handleSyncFeed}
+                disabled={syncLoading || !selectedFeed}
+              >
+                {syncLoading ? "抓取中" : "抓取"}
+              </Button>
+            </div>
+            {syncStatus && (
+              <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
+                {syncStatus}
+              </div>
+            )}
+
+            {/* Article List */}
+            <div className="flex-1 overflow-y-auto">
+              {visibleArticles.map((article) => (
+                <button
+                  type="button"
+                  key={article.id}
+                  className={`w-full text-left p-4 border-b border-border transition-colors ${
+                    selectedArticle?.id === article.id
+                      ? "bg-accent"
+                      : "hover:bg-accent/50"
+                  } ${article.is_read ? "opacity-60" : ""}`}
+                  onClick={() => setSelectedArticle(article)}
+                  data-tauri-drag-region={false}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className={`text-sm ${article.is_read ? "font-normal" : "font-semibold"} line-clamp-2`}>
+                      {article.title}
+                    </h3>
+                      {article.is_favorite && <span>⭐</span>}
+                    </div>
+                  <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                    {article.summary || ""}
+                  </p>
+                  <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
+                    <span>{article.author || "Unknown"}</span>
+                    <span>
+                      {article.pub_date ? new Date(article.pub_date).toLocaleDateString() : ""}
+                    </span>
+                  </div>
+                </button>
+              ))}
+              {!loading && visibleArticles.length === 0 && (
+                <div className="p-6 text-sm text-muted-foreground">
+                  暂无文章，先添加一个订阅源。
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Right: Article Reader */}
       <main className="flex-1 bg-background flex flex-col min-w-0">
         {selectedArticle ? (
           <>
             {/* Article Header */}
-            <header className="h-14 flex items-center px-6 border-b border-border justify-between">
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  data-tauri-drag-region={false}
-                  onClick={handleToggleRead}
-                >
-                  {selectedArticle.is_read ? "标为未读" : "标为已读"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  data-tauri-drag-region={false}
-                  onClick={handleToggleFavorite}
-                >
-                  {selectedArticle.is_favorite ? "取消收藏" : "收藏"}
-                </Button>
-              </div>
-              <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                <span>{readProgress.toFixed(0)}%</span>
-                {contentError && (
-                  <span className="text-destructive">{contentError}</span>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  asChild
-                  data-tauri-drag-region={false}
-                >
-                  <a
-                    href={selectedArticle?.url || "#"}
-                    target="_blank"
-                    rel="noopener noreferrer"
+            <header
+              className={`h-14 flex items-center border-b border-border ${
+                isFocusMode ? "pl-24 pr-6" : "px-6"
+              }`}
+            >
+              <div
+                className={`flex items-center justify-between w-full ${
+                  isFocusMode ? "max-w-3xl mx-auto" : ""
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    data-tauri-drag-region={false}
+                    onClick={handleToggleRead}
                   >
-                    原文链接 ↗
-                  </a>
-                </Button>
+                    {selectedArticle.is_read ? "标为未读" : "标为已读"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    data-tauri-drag-region={false}
+                    onClick={handleToggleFavorite}
+                  >
+                    {selectedArticle.is_favorite ? "取消收藏" : "收藏"}
+                  </Button>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <div className="flex items-center gap-1 rounded-md border border-border px-1 py-0.5">
+                    <button
+                      type="button"
+                      className="h-6 w-6 text-[10px] text-muted-foreground hover:text-foreground"
+                      onClick={handleDecreaseFont}
+                      data-tauri-drag-region={false}
+                      aria-label="减小字号"
+                      title="减小字号"
+                    >
+                      A-
+                    </button>
+                    <span className="text-[10px]">{readerFontSize}px</span>
+                    <button
+                      type="button"
+                      className="h-6 w-6 text-[10px] text-muted-foreground hover:text-foreground"
+                      onClick={handleIncreaseFont}
+                      data-tauri-drag-region={false}
+                      aria-label="增大字号"
+                      title="增大字号"
+                    >
+                      A+
+                    </button>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-tauri-drag-region={false}
+                    onClick={handleToggleFocusMode}
+                  >
+                    {isFocusMode ? "退出专注" : "专注模式"}
+                  </Button>
+                  <span>{readProgress.toFixed(0)}%</span>
+                  {contentError && (
+                    <span className="text-destructive">{contentError}</span>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    asChild
+                    data-tauri-drag-region={false}
+                  >
+                    <a
+                      href={selectedArticle?.url || "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      原文链接 ↗
+                    </a>
+                  </Button>
+                </div>
               </div>
             </header>
 
             {/* Article Content */}
             <article
-              className="flex-1 overflow-y-auto px-8 py-6"
+              className={`flex-1 overflow-y-auto py-6 ${
+                isFocusMode ? "px-6 max-w-3xl mx-auto w-full" : "px-8"
+              }`}
               data-tauri-drag-region={false}
               ref={contentRef}
             >
@@ -939,7 +1216,13 @@ function App() {
                       重试全文抓取
                     </Button>
                   )}
-                  <div className="prose prose-lg max-w-none dark:prose-invert prose-pre:bg-neutral-900 prose-pre:text-neutral-100 prose-pre:rounded-lg prose-pre:px-4 prose-pre:py-3 prose-img:rounded-lg">
+                  <div
+                    className="reader-content prose prose-lg max-w-none dark:prose-invert prose-pre:bg-neutral-900 prose-pre:text-neutral-100 prose-pre:rounded-lg prose-pre:px-4 prose-pre:py-3 prose-img:rounded-lg"
+                    style={{
+                      fontSize: `${readerFontSize}px`,
+                      ["--reader-font-size" as string]: `${readerFontSize}px`,
+                    }}
+                  >
                     {parse(contentHtml || selectedArticle.summary || "")}
                   </div>
                 </div>
@@ -951,6 +1234,16 @@ function App() {
             <div className="text-center">
               <p className="text-lg mb-2">选择一篇文章开始阅读</p>
               <p className="text-sm">或从左侧添加新的 RSS 订阅源</p>
+              <div className="mt-4">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-tauri-drag-region={false}
+                  onClick={handleToggleFocusMode}
+                >
+                  {isFocusMode ? "退出专注" : "专注模式"}
+                </Button>
+              </div>
               {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
             </div>
           </div>
