@@ -325,13 +325,21 @@ pub async fn fetch_article_content(
         return Ok(article);
     }
 
+    if !ContentService::should_extract(article.summary.as_deref()) {
+        return Ok(article);
+    }
+
     if article.url.is_empty() {
         return Ok(article);
     }
 
-    let mut content = ContentService::extract_full_text(&article.url)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut content = match ContentService::extract_full_text(&article.url).await {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!("Failed to extract content for {}: {}", article.url, error);
+            return Ok(article);
+        }
+    };
     content.retain(|ch| {
         if ch == '\u{0000}' {
             return false;
@@ -455,6 +463,12 @@ pub async fn fetch_feed_articles(
             continue;
         }
 
+        if let (Some(last_fetch_at), Some(pub_date)) = (feed.last_fetch_at, entry.pub_date) {
+            if pub_date <= last_fetch_at {
+                continue;
+            }
+        }
+
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM articles WHERE feed_id = ? AND url = ? LIMIT 1",
         )
@@ -473,6 +487,8 @@ pub async fn fetch_feed_articles(
             .summary
             .clone()
             .or_else(|| entry.content.clone());
+        let content = entry.content.clone().filter(|value| !value.trim().is_empty());
+        let content_extracted = content.is_some();
 
         sqlx::query(
             "INSERT INTO articles (id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -484,8 +500,8 @@ pub async fn fetch_feed_articles(
         .bind(&entry.author)
         .bind(entry.pub_date)
         .bind(summary)
-        .bind(None::<String>)
-        .bind(false)
+        .bind(content)
+        .bind(content_extracted)
         .bind(false)
         .bind(false)
         .bind(0.0_f64)

@@ -51,6 +51,7 @@ function App() {
   const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "unread">("newest");
+  const [articleLimit, setArticleLimit] = useState(50);
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const autoSyncRunningRef = useRef(false);
@@ -58,7 +59,11 @@ function App() {
   const [contentHtml, setContentHtml] = useState<string>("");
   const [contentError, setContentError] = useState<string | null>(null);
   const [readProgress, setReadProgress] = useState(0);
+  const [tocItems, setTocItems] = useState<Array<{ id: string; text: string; level: number }>>(
+    []
+  );
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const lastSavedProgressRef = useRef(0);
 
   const {
@@ -136,9 +141,16 @@ function App() {
     }
   }, [readerFontSize]);
 
+  const reloadAll = useCallback(
+    async (limitOverride?: number) => {
+      await loadAll(limitOverride ?? articleLimit);
+    },
+    [articleLimit, loadAll]
+  );
+
   useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+    reloadAll();
+  }, [reloadAll]);
 
   useEffect(() => {
     if (!selectedFeed) {
@@ -162,6 +174,13 @@ function App() {
   const totalUnread = useMemo(() => {
     return articles.filter((article) => !article.is_read).length;
   }, [articles]);
+
+  const selectedFeedInfo = useMemo(() => {
+    if (!selectedFeed) {
+      return null;
+    }
+    return feeds.find((feed) => feed.id === selectedFeed) ?? null;
+  }, [feeds, selectedFeed]);
 
   const selectedFeedTitle = useMemo(() => {
     if (!selectedArticle) {
@@ -259,6 +278,23 @@ function App() {
     return estimateReadMinutes(plain);
   }, [contentHtml, estimateReadMinutes, selectedArticle]);
 
+  const handleLoadMore = () => {
+    const next = articleLimit + 50;
+    setArticleLimit(next);
+    reloadAll(next);
+  };
+
+  const formatDateTime = useCallback((value?: string | null) => {
+    if (!value) {
+      return "未同步";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return "未同步";
+    }
+    return date.toLocaleString();
+  }, []);
+
   const handleAddSampleData = async () => {
     try {
       setSeedLoading(true);
@@ -286,7 +322,7 @@ function App() {
         return;
       }
 
-      await loadAll();
+      await reloadAll();
       setSeedStatus("写入完成");
     } catch (error) {
       console.error("Seed data failed", error);
@@ -399,7 +435,7 @@ function App() {
         return;
       }
 
-      await loadAll();
+      await reloadAll();
       setSeedStatus(editingFeedId ? "订阅源已更新" : "订阅源已保存");
       closeFeedForm();
     } catch (error) {
@@ -419,7 +455,7 @@ function App() {
     try {
       setSyncLoading(true);
       setSyncStatus("正在抓取 RSS...");
-      const inserted = await fetchFeedArticles(selectedFeed);
+      const inserted = await fetchFeedArticles(selectedFeed, articleLimit);
       if (inserted === null) {
         setSyncStatus(useDataStore.getState().error || "抓取失败");
         return;
@@ -473,7 +509,7 @@ function App() {
 
     try {
       for (const feed of feeds) {
-        const inserted = await fetchFeedArticles(feed.id);
+        const inserted = await fetchFeedArticles(feed.id, articleLimit);
         if (typeof inserted === "number") {
           totalInserted += inserted;
         }
@@ -488,7 +524,7 @@ function App() {
     } finally {
       autoSyncRunningRef.current = false;
     }
-  }, [autoSyncEnabled, feeds, fetchFeedArticles]);
+  }, [articleLimit, autoSyncEnabled, feeds, fetchFeedArticles]);
 
   useEffect(() => {
     if (!autoSyncEnabled) {
@@ -505,7 +541,7 @@ function App() {
     };
   }, [autoSyncEnabled, handleAutoSyncAll]);
 
-  const handleToggleRead = async () => {
+  const handleToggleRead = useCallback(async () => {
     if (!selectedArticle) {
       return;
     }
@@ -514,9 +550,9 @@ function App() {
       !selectedArticle.is_read,
       selectedArticle.is_favorite
     );
-  };
+  }, [selectedArticle, updateArticleFlags]);
 
-  const handleToggleFavorite = async () => {
+  const handleToggleFavorite = useCallback(async () => {
     if (!selectedArticle) {
       return;
     }
@@ -525,7 +561,7 @@ function App() {
       selectedArticle.is_read,
       !selectedArticle.is_favorite
     );
-  };
+  }, [selectedArticle, updateArticleFlags]);
 
   const handleDecreaseFont = () => {
     setReaderFontSize((value) => Math.max(14, value - 1));
@@ -538,6 +574,23 @@ function App() {
   const handleToggleFocusMode = () => {
     setIsFocusMode((value) => !value);
   };
+
+  const handleSelectNeighbor = useCallback(
+    (delta: number) => {
+      if (!selectedArticle || visibleArticles.length === 0) {
+        return;
+      }
+      const index = visibleArticles.findIndex((article) => article.id === selectedArticle.id);
+      if (index < 0) {
+        return;
+      }
+      const next = visibleArticles[index + delta];
+      if (next) {
+        setSelectedArticle(next);
+      }
+    },
+    [selectedArticle, visibleArticles]
+  );
 
   const deriveFaviconUrl = useCallback((feed: (typeof feeds)[number]) => {
     const candidate = feed.site_url || feed.url;
@@ -553,6 +606,22 @@ function App() {
     }
   }, []);
 
+  const handleTocJump = useCallback((id: string) => {
+    const container = contentRef.current;
+    if (!container) {
+      return;
+    }
+    const selector =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? `#${CSS.escape(id)}`
+        : `#${id.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+    const target = container.querySelector(selector) as HTMLElement | null;
+    if (!target) {
+      return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   const buildContentHtml = useCallback((html: string) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
@@ -566,6 +635,23 @@ function App() {
     anchors.forEach((a) => {
       a.setAttribute("target", "_blank");
       a.setAttribute("rel", "noopener noreferrer");
+    });
+
+    const headings = Array.from(doc.querySelectorAll("h2, h3"));
+    const used = new Map<string, number>();
+    headings.forEach((heading, index) => {
+      const raw = heading.textContent?.trim() || "";
+      let base = raw
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+      if (!base) {
+        base = `section-${index + 1}`;
+      }
+      const count = used.get(base) ?? 0;
+      used.set(base, count + 1);
+      const id = count > 0 ? `${base}-${count + 1}` : base;
+      heading.setAttribute("id", id);
     });
 
     return doc.body.innerHTML;
@@ -627,6 +713,23 @@ function App() {
   }, [contentHtml]);
 
   useEffect(() => {
+    if (!contentHtml) {
+      setTocItems([]);
+      return;
+    }
+    const doc = new DOMParser().parseFromString(contentHtml, "text/html");
+    const headings = Array.from(doc.querySelectorAll("h2, h3"));
+    const items = headings
+      .map((heading) => ({
+        id: heading.getAttribute("id") || "",
+        text: heading.textContent?.trim() || "",
+        level: heading.tagName === "H3" ? 3 : 2,
+      }))
+      .filter((item) => item.id && item.text);
+    setTocItems(items);
+  }, [contentHtml]);
+
+  useEffect(() => {
     if (!selectedArticle || !contentRef.current) {
       return;
     }
@@ -652,6 +755,55 @@ function App() {
       container.removeEventListener("scroll", handleScroll);
     };
   }, [selectedArticle, updateArticleProgress]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.key === "/") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        handleSelectNeighbor(1);
+        return;
+      }
+
+      if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        handleSelectNeighbor(-1);
+        return;
+      }
+
+      if (event.key === "f") {
+        event.preventDefault();
+        handleToggleFavorite();
+        return;
+      }
+
+      if (event.key === "r") {
+        event.preventDefault();
+        handleToggleRead();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleSelectNeighbor, handleToggleFavorite, handleToggleRead]);
 
   useEffect(() => {
     const pending = feeds.filter((feed) => !feed.favicon_url);
@@ -1164,6 +1316,7 @@ function App() {
                 placeholder="搜索文章..."
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
+                ref={searchInputRef}
                 className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 data-tauri-drag-region={false}
               />
@@ -1185,22 +1338,38 @@ function App() {
                 {syncLoading ? "抓取中" : "抓取"}
               </Button>
             </div>
-            <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border flex items-center justify-between gap-2">
-              <span>
-                {visibleArticles.length} 篇
-                {filterMode === "unread" ? " · 未读" : filterMode === "favorites" ? " · 收藏" : ""}
-              </span>
-              <select
-                className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                value={sortMode}
-                onChange={(event) => setSortMode(event.target.value as typeof sortMode)}
-                data-tauri-drag-region={false}
-              >
-                <option value="newest">最新优先</option>
-                <option value="oldest">最早优先</option>
-                <option value="unread">未读优先</option>
-                <option value="title">标题排序</option>
-              </select>
+            <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span>
+                  {visibleArticles.length} 篇
+                  {filterMode === "unread"
+                    ? " · 未读"
+                    : filterMode === "favorites"
+                      ? " · 收藏"
+                      : ""}
+                </span>
+                <select
+                  className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                  value={sortMode}
+                  onChange={(event) => setSortMode(event.target.value as typeof sortMode)}
+                  data-tauri-drag-region={false}
+                >
+                  <option value="newest">最新优先</option>
+                  <option value="oldest">最早优先</option>
+                  <option value="unread">未读优先</option>
+                  <option value="title">标题排序</option>
+                </select>
+              </div>
+              {selectedFeedInfo && (
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span>上次同步 {formatDateTime(selectedFeedInfo.last_fetch_at)}</span>
+                  {selectedFeedInfo.last_fetch_error ? (
+                    <span className="text-destructive truncate" title={selectedFeedInfo.last_fetch_error}>
+                      {selectedFeedInfo.last_fetch_error}
+                    </span>
+                  ) : null}
+                </div>
+              )}
             </div>
             {syncStatus && (
               <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
@@ -1242,6 +1411,19 @@ function App() {
               {!loading && visibleArticles.length === 0 && (
                 <div className="p-6 text-sm text-muted-foreground">
                   暂无文章，先添加一个订阅源。
+                </div>
+              )}
+              {!loading && articles.length >= articleLimit && (
+                <div className="p-4">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="w-full"
+                    data-tauri-drag-region={false}
+                    onClick={handleLoadMore}
+                  >
+                    加载更多
+                  </Button>
                 </div>
               )}
             </div>
@@ -1335,6 +1517,12 @@ function App() {
                 </div>
               </div>
             </header>
+            <div className="h-0.5 bg-border">
+              <div
+                className="h-full bg-primary transition-[width] duration-150"
+                style={{ width: `${readProgress}%` }}
+              />
+            </div>
 
             {/* Article Content */}
             <article
@@ -1345,7 +1533,7 @@ function App() {
               ref={contentRef}
             >
               <h1 className="text-3xl font-bold mb-4">{selectedArticle.title}</h1>
-              <div className="flex items-center gap-4 text-sm text-muted-foreground mb-8">
+              <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground mb-8">
                 <span>{selectedArticle.author || "Unknown"}</span>
                 <span>•</span>
                 <span>
@@ -1353,6 +1541,8 @@ function App() {
                     ? new Date(selectedArticle.pub_date).toLocaleString()
                     : ""}
                 </span>
+                <span>•</span>
+                <span>{selectedArticle.content_extracted ? "全文" : "摘要"}</span>
                 {selectedFeedTitle && (
                   <>
                     <span>•</span>
@@ -1370,6 +1560,26 @@ function App() {
                 <div className="text-sm text-muted-foreground">正在加载全文...</div>
               ) : (
                 <div className="space-y-4">
+                  {tocItems.length > 0 && (
+                    <div className="rounded-lg border border-border bg-card/30 p-3">
+                      <div className="text-xs font-semibold text-muted-foreground mb-2">目录</div>
+                      <div className="space-y-1">
+                        {tocItems.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`w-full text-left text-sm text-muted-foreground hover:text-foreground ${
+                              item.level === 3 ? "pl-4" : ""
+                            }`}
+                            onClick={() => handleTocJump(item.id)}
+                            data-tauri-drag-region={false}
+                          >
+                            {item.text}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {contentError && (
                     <Button
                       size="sm"

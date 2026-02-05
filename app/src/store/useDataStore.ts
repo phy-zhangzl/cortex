@@ -16,6 +16,9 @@ export interface Feed {
   description?: string | null;
   category_id?: string | null;
   favicon_url?: string | null;
+  last_fetch_at?: string | null;
+  last_fetch_error?: string | null;
+  fetch_error_count?: number;
   is_active: boolean;
 }
 
@@ -40,7 +43,7 @@ interface DataState {
   articles: Article[];
   loading: boolean;
   error: string | null;
-  loadAll: () => Promise<void>;
+  loadAll: (limit?: number) => Promise<void>;
   createCategory: (name: string, parentId?: string | null) => Promise<Category | null>;
   updateCategoryName: (categoryId: string, name: string) => Promise<Category | null>;
   deleteCategory: (categoryId: string) => Promise<boolean>;
@@ -61,7 +64,7 @@ interface DataState {
   }) => Promise<Feed | null>;
   updateFeedFavicon: (feedId: string, faviconUrl: string | null) => Promise<Feed | null>;
   updateFeedCategory: (feedId: string, categoryId: string | null) => Promise<Feed | null>;
-  fetchFeedArticles: (feedId: string) => Promise<number | null>;
+  fetchFeedArticles: (feedId: string, refreshLimit?: number) => Promise<number | null>;
   deleteFeed: (feedId: string) => Promise<boolean>;
   fetchArticleContent: (articleId: string) => Promise<Article | null>;
   updateArticleProgress: (articleId: string, progress: number, isRead: boolean) => Promise<void>;
@@ -74,13 +77,13 @@ export const useDataStore = create<DataState>((set, get) => ({
   articles: [],
   loading: false,
   error: null,
-  loadAll: async () => {
+  loadAll: async (limit) => {
     set({ loading: true, error: null });
     try {
       const [categories, feeds, articles] = await Promise.all([
         invoke<Category[]>("list_categories"),
         invoke<Feed[]>("list_feeds"),
-        invoke<Article[]>("list_articles", { feedId: null, limit: 50 }),
+        invoke<Article[]>("list_articles", { feedId: null, limit: limit ?? 50 }),
       ]);
       set({ categories, feeds, articles, loading: false });
     } catch (error) {
@@ -193,13 +196,13 @@ export const useDataStore = create<DataState>((set, get) => ({
       return null;
     }
   },
-  fetchFeedArticles: async (feedId) => {
+  fetchFeedArticles: async (feedId, refreshLimit) => {
     try {
       const inserted = await invoke<number>("fetch_feed_articles", {
         feedId,
         limit: 30,
       });
-      await get().loadAll();
+      await get().loadAll(refreshLimit);
       return inserted;
     } catch (error) {
       set({ error: String(error) });
