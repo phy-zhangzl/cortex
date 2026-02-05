@@ -1,0 +1,963 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Button } from "@/components/ui/button";
+import { useDataStore } from "@/store/useDataStore";
+import hljs from "highlight.js";
+import "highlight.js/styles/github-dark.css";
+import parse from "html-react-parser";
+
+// Types for our data structures
+type Article = ReturnType<typeof useDataStore.getState>["articles"][number];
+
+function App() {
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedFeed, setSelectedFeed] = useState<string | null>(null);
+  const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [seedStatus, setSeedStatus] = useState<string | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [feedTitle, setFeedTitle] = useState("");
+  const [feedUrl, setFeedUrl] = useState("");
+  const [feedSiteUrl, setFeedSiteUrl] = useState("");
+  const [feedCategoryId, setFeedCategoryId] = useState<string | null>(null);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [selectedFeedCategoryId, setSelectedFeedCategoryId] = useState<string | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
+  const autoSyncRunningRef = useRef(false);
+  const [contentLoading, setContentLoading] = useState(false);
+  const [contentHtml, setContentHtml] = useState<string>("");
+  const [contentError, setContentError] = useState<string | null>(null);
+  const [readProgress, setReadProgress] = useState(0);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const lastSavedProgressRef = useRef(0);
+
+  const {
+    categories,
+    feeds,
+    articles,
+    loading,
+    error,
+    loadAll,
+    createCategory,
+    deleteCategory,
+    createFeed,
+    updateFeedCategory,
+    fetchFeedArticles,
+    deleteFeed,
+    fetchArticleContent,
+    updateArticleProgress,
+    updateArticleFlags,
+  } = useDataStore();
+
+  const appWindow = getCurrentWindow();
+
+  const handleDragPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const target = event.target as Element | null;
+    if (!target || typeof (target as Element).closest !== "function") {
+      return;
+    }
+
+    if (
+      target.closest(
+        "button, a, input, textarea, select, option, .no-drag, [data-tauri-drag-region='false']"
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await appWindow.startDragging();
+    } catch (error) {
+      console.error("startDragging failed", error);
+    }
+  };
+
+  // Toggle dark mode
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
+
+  useEffect(() => {
+    if (!selectedFeed && feeds.length > 0) {
+      setSelectedFeed(feeds[0].id);
+      setSelectedCategory(null);
+    }
+  }, [feeds, selectedFeed]);
+
+  useEffect(() => {
+    if (!selectedFeed) {
+      setSelectedFeedCategoryId(null);
+      return;
+    }
+    const feed = feeds.find((item) => item.id === selectedFeed);
+    setSelectedFeedCategoryId(feed?.category_id ?? null);
+  }, [feeds, selectedFeed]);
+
+  const unreadCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    articles.forEach((article) => {
+      if (!article.is_read) {
+        counts.set(article.feed_id, (counts.get(article.feed_id) || 0) + 1);
+      }
+    });
+    return counts;
+  }, [articles]);
+
+  const totalUnread = useMemo(() => {
+    return articles.filter((article) => !article.is_read).length;
+  }, [articles]);
+
+  const filteredArticles = useMemo(() => {
+    if (selectedFeed) {
+      return articles.filter((article) => article.feed_id === selectedFeed);
+    }
+    if (selectedCategory) {
+      const feedIds = feeds
+        .filter((feed) => feed.category_id === selectedCategory)
+        .map((feed) => feed.id);
+      return articles.filter((article) => feedIds.includes(article.feed_id));
+    }
+    return articles;
+  }, [articles, feeds, selectedCategory, selectedFeed]);
+
+  const visibleArticles = useMemo(() => {
+    if (filterMode === "unread") {
+      return filteredArticles.filter((article) => !article.is_read);
+    }
+    if (filterMode === "favorites") {
+      return filteredArticles.filter((article) => article.is_favorite);
+    }
+    return filteredArticles;
+  }, [filteredArticles, filterMode]);
+
+  const handleAddSampleData = async () => {
+    try {
+      setSeedLoading(true);
+      setSeedStatus("正在写入数据库...");
+      const existingCategory = categories[0];
+      const category =
+        existingCategory || (await createCategory("技术", null));
+
+      if (!category) {
+        setSeedStatus(useDataStore.getState().error || "写入分类失败");
+        setSeedLoading(false);
+        return;
+      }
+
+      const feed = await createFeed({
+        title: "OpenAI Blog",
+        url: "https://openai.com/blog/rss.xml",
+        siteUrl: "https://openai.com/blog",
+        description: "OpenAI 官方博客",
+        categoryId: category.id,
+      });
+
+      if (!feed) {
+        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
+        return;
+      }
+
+      await loadAll();
+      setSeedStatus("写入完成");
+    } catch (error) {
+      console.error("Seed data failed", error);
+      setSeedStatus(`失败: ${String(error)}`);
+    } finally {
+      setSeedLoading(false);
+    }
+  };
+
+  const handleCreateFeed = async () => {
+    if (!feedTitle.trim() || !feedUrl.trim()) {
+      setSeedStatus("请填写标题和 RSS 地址");
+      return;
+    }
+
+    const urlText = feedUrl.trim();
+    if (urlText.startsWith("<")) {
+      setSeedStatus("RSS 地址需要填写 URL，不是 XML 内容");
+      return;
+    }
+
+    try {
+      const parsedUrl = new URL(urlText);
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+        setSeedStatus("RSS 地址必须是 http/https URL");
+        return;
+      }
+    } catch {
+      setSeedStatus("请填写有效的 RSS URL，例如 https://baoyu.io/feed.xml");
+      return;
+    }
+
+    try {
+      setSeedLoading(true);
+      setSeedStatus("正在保存订阅源...");
+
+      const existingCategory = categories[0];
+      const category =
+        existingCategory || (await createCategory("未分类", null));
+
+      if (!category) {
+        setSeedStatus(useDataStore.getState().error || "写入分类失败");
+        return;
+      }
+
+      const feed = await createFeed({
+        title: feedTitle.trim(),
+        url: urlText,
+        siteUrl: feedSiteUrl.trim() || null,
+        description: null,
+        categoryId: feedCategoryId ?? category.id,
+      });
+
+      if (!feed) {
+        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
+        return;
+      }
+
+      await loadAll();
+      setSeedStatus("订阅源已保存");
+      setShowAddForm(false);
+      setFeedTitle("");
+      setFeedUrl("");
+      setFeedSiteUrl("");
+      setFeedCategoryId(null);
+    } catch (error) {
+      console.error("Create feed failed", error);
+      setSeedStatus(`失败: ${String(error)}`);
+    } finally {
+      setSeedLoading(false);
+    }
+  };
+
+  const handleSyncFeed = async () => {
+    if (!selectedFeed) {
+      setSyncStatus("请选择一个订阅源");
+      return;
+    }
+
+    try {
+      setSyncLoading(true);
+      setSyncStatus("正在抓取 RSS...");
+      const inserted = await fetchFeedArticles(selectedFeed);
+      if (inserted === null) {
+        setSyncStatus(useDataStore.getState().error || "抓取失败");
+        return;
+      }
+      setSyncStatus(`新增 ${inserted} 篇文章`);
+    } catch (error) {
+      setSyncStatus(`失败: ${String(error)}`);
+    } finally {
+      setSyncLoading(false);
+    }
+  };
+
+  const handleCreateCategory = async () => {
+    const name = newCategoryName.trim();
+    if (!name) {
+      setSeedStatus("请输入分类名称");
+      return;
+    }
+    const category = await createCategory(name, null);
+    if (!category) {
+      setSeedStatus(useDataStore.getState().error || "创建分类失败");
+      return;
+    }
+    setNewCategoryName("");
+  };
+
+  const handleDeleteCategory = async (categoryId: string) => {
+    if (!confirm("确定要删除该分类吗？分类下订阅会移到未分类。")) {
+      return;
+    }
+    const ok = await deleteCategory(categoryId);
+    if (!ok) {
+      setSeedStatus(useDataStore.getState().error || "删除分类失败");
+    }
+  };
+
+  const handleUpdateSelectedFeedCategory = async () => {
+    if (!selectedFeed) {
+      return;
+    }
+    await updateFeedCategory(selectedFeed, selectedFeedCategoryId);
+  };
+
+  const handleAutoSyncAll = useCallback(async () => {
+    if (autoSyncRunningRef.current || feeds.length === 0) {
+      return;
+    }
+
+    autoSyncRunningRef.current = true;
+    let totalInserted = 0;
+
+    try {
+      for (const feed of feeds) {
+        const inserted = await fetchFeedArticles(feed.id);
+        if (typeof inserted === "number") {
+          totalInserted += inserted;
+        }
+      }
+      if (autoSyncEnabled) {
+        setSyncStatus(`自动同步完成，新增 ${totalInserted} 篇文章`);
+      }
+    } catch (error) {
+      if (autoSyncEnabled) {
+        setSyncStatus(`自动同步失败: ${String(error)}`);
+      }
+    } finally {
+      autoSyncRunningRef.current = false;
+    }
+  }, [autoSyncEnabled, feeds, fetchFeedArticles]);
+
+  useEffect(() => {
+    if (!autoSyncEnabled) {
+      return;
+    }
+
+    handleAutoSyncAll();
+    const timer = window.setInterval(() => {
+      handleAutoSyncAll();
+    }, 15 * 60 * 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [autoSyncEnabled, handleAutoSyncAll]);
+
+  const handleToggleRead = async () => {
+    if (!selectedArticle) {
+      return;
+    }
+    await updateArticleFlags(
+      selectedArticle.id,
+      !selectedArticle.is_read,
+      selectedArticle.is_favorite
+    );
+  };
+
+  const handleToggleFavorite = async () => {
+    if (!selectedArticle) {
+      return;
+    }
+    await updateArticleFlags(
+      selectedArticle.id,
+      selectedArticle.is_read,
+      !selectedArticle.is_favorite
+    );
+  };
+
+  const buildContentHtml = useCallback((html: string) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const images = Array.from(doc.querySelectorAll("img"));
+    images.forEach((img) => {
+      img.setAttribute("loading", "lazy");
+      img.setAttribute("decoding", "async");
+    });
+
+    const anchors = Array.from(doc.querySelectorAll("a"));
+    anchors.forEach((a) => {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    });
+
+    return doc.body.innerHTML;
+  }, []);
+
+  useEffect(() => {
+    if (!selectedArticle) {
+      setContentHtml("");
+      setContentError(null);
+      setReadProgress(0);
+      return;
+    }
+
+    let cancelled = false;
+    const loadContent = async () => {
+      setContentLoading(true);
+      setContentError(null);
+      if (selectedArticle.content) {
+        const html = buildContentHtml(selectedArticle.content);
+        if (!cancelled) {
+          setContentHtml(html);
+          setContentLoading(false);
+        }
+        return;
+      }
+
+      const article = await fetchArticleContent(selectedArticle.id);
+      if (cancelled) {
+        return;
+      }
+
+      if (article?.content) {
+        setContentHtml(buildContentHtml(article.content));
+      } else {
+        setContentHtml(selectedArticle.summary || "");
+        setContentError(useDataStore.getState().error || "全文抓取失败");
+      }
+      setContentLoading(false);
+    };
+
+    loadContent();
+    lastSavedProgressRef.current = selectedArticle.read_progress || 0;
+    setReadProgress(selectedArticle.read_progress || 0);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [buildContentHtml, fetchArticleContent, selectedArticle]);
+
+  useEffect(() => {
+    if (!contentHtml || !contentRef.current) {
+      return;
+    }
+
+    const blocks = contentRef.current.querySelectorAll("pre code");
+    blocks.forEach((block) => {
+      hljs.highlightElement(block as HTMLElement);
+    });
+  }, [contentHtml]);
+
+  useEffect(() => {
+    if (!selectedArticle || !contentRef.current) {
+      return;
+    }
+
+    const container = contentRef.current;
+    const handleScroll = () => {
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      if (maxScroll <= 0) {
+        return;
+      }
+      const progress = Math.min(100, Math.max(0, (container.scrollTop / maxScroll) * 100));
+      setReadProgress(progress);
+
+      if (Math.abs(progress - lastSavedProgressRef.current) >= 1) {
+        lastSavedProgressRef.current = progress;
+        const isRead = progress >= 95;
+        updateArticleProgress(selectedArticle.id, progress, isRead);
+      }
+    };
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+    };
+  }, [selectedArticle, updateArticleProgress]);
+
+  const handleDeleteFeed = async (feedId: string) => {
+    if (!confirm("确定要删除该订阅源吗？")) {
+      return;
+    }
+
+    const ok = await deleteFeed(feedId);
+    if (!ok) {
+      setSeedStatus(useDataStore.getState().error || "删除失败");
+      return;
+    }
+
+    if (selectedFeed === feedId) {
+      setSelectedFeed(null);
+      setSelectedArticle(null);
+    }
+  };
+
+  return (
+    <div
+      className="flex h-screen w-full bg-background text-foreground overflow-hidden"
+      onPointerDownCapture={handleDragPointerDown}
+      role="application"
+      tabIndex={-1}
+      onKeyDown={() => {}}
+    >
+      {/* Left Sidebar: Categories & Feeds */}
+      <aside className="w-[240px] min-w-[240px] border-r border-border bg-card flex flex-col overflow-x-hidden">
+        {/* Header */}
+        <div className="h-12 flex items-center gap-2 border-b border-border px-3 pl-16 pt-3">
+          <h1 className="text-lg font-bold">Cortex</h1>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="ml-auto h-8 w-8"
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            data-tauri-drag-region={false}
+          >
+            {isDarkMode ? "☀️" : "🌙"}
+          </Button>
+        </div>
+
+        {/* Add Feed Button */}
+        <div className="p-2" data-tauri-drag-region={false}>
+          <Button
+            className="w-full h-auto py-2.5 text-sm leading-5 whitespace-normal"
+            size="default"
+            data-tauri-drag-region={false}
+            onClick={() => setShowAddForm((value) => !value)}
+            disabled={seedLoading}
+          >
+            {showAddForm ? "收起" : "+ 添加订阅源"}
+          </Button>
+          {showAddForm && (
+            <div className="mt-3 space-y-2 text-xs">
+              <input
+                type="text"
+                placeholder="订阅名称"
+                value={feedTitle}
+                onChange={(event) => setFeedTitle(event.target.value)}
+                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                data-tauri-drag-region={false}
+              />
+              <input
+                type="text"
+                placeholder="RSS 地址 (必填)"
+                value={feedUrl}
+                onChange={(event) => setFeedUrl(event.target.value)}
+                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                data-tauri-drag-region={false}
+              />
+              <input
+                type="text"
+                placeholder="站点地址 (可选)"
+                value={feedSiteUrl}
+                onChange={(event) => setFeedSiteUrl(event.target.value)}
+                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                data-tauri-drag-region={false}
+              />
+              <select
+                className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                value={feedCategoryId || ""}
+                onChange={(event) => setFeedCategoryId(event.target.value || null)}
+                data-tauri-drag-region={false}
+              >
+                <option value="">未分类</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1"
+                  size="sm"
+                  data-tauri-drag-region={false}
+                  onClick={handleCreateFeed}
+                  disabled={seedLoading}
+                >
+                  保存
+                </Button>
+                <Button
+                  className="flex-1"
+                  size="sm"
+                  variant="ghost"
+                  data-tauri-drag-region={false}
+                  onClick={() => setShowAddForm(false)}
+                >
+                  取消
+                </Button>
+              </div>
+            </div>
+          )}
+          {seedStatus && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              {seedStatus}
+            </div>
+          )}
+          <button
+            type="button"
+            className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={handleAddSampleData}
+            data-tauri-drag-region={false}
+          >
+            快速添加示例订阅
+          </button>
+        </div>
+        <div className="px-3 pb-3">
+          <div className="text-[11px] font-semibold text-muted-foreground tracking-wider mb-2">
+            分类管理
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="新分类名称"
+              value={newCategoryName}
+              onChange={(event) => setNewCategoryName(event.target.value)}
+              className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-ring"
+              data-tauri-drag-region={false}
+            />
+            <Button
+              size="sm"
+              className="px-3 h-8 text-[11px] shrink-0"
+              data-tauri-drag-region={false}
+              onClick={handleCreateCategory}
+            >
+              添加
+            </Button>
+          </div>
+        </div>
+
+        {/* Categories & Feeds List */}
+        <div className="flex-1 overflow-y-auto">
+          {/* All Items */}
+          <div className="px-3 py-1">
+            <button
+              type="button"
+              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                selectedCategory === null && selectedFeed === null
+                  ? "bg-accent text-accent-foreground"
+                  : "hover:bg-accent/50"
+              }`}
+              onClick={() => {
+                setSelectedCategory(null);
+                setSelectedFeed(null);
+              }}
+              data-tauri-drag-region={false}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate">全部文章</span>
+                {totalUnread > 0 && (
+                  <span className="text-xs bg-primary text-primary-foreground px-2 py-0.5 rounded-full">
+                    {totalUnread}
+                  </span>
+                )}
+              </div>
+            </button>
+          </div>
+          <div className="px-3 py-1">
+            <button
+              type="button"
+              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                filterMode === "unread"
+                  ? "bg-accent text-accent-foreground"
+                  : "hover:bg-accent/50"
+              }`}
+              onClick={() => {
+                setFilterMode("unread");
+                setSelectedCategory(null);
+                setSelectedFeed(null);
+              }}
+              data-tauri-drag-region={false}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate">未读</span>
+                {totalUnread > 0 && (
+                  <span className="text-xs text-muted-foreground">{totalUnread}</span>
+                )}
+              </div>
+            </button>
+          </div>
+          <div className="px-3 py-1">
+            <button
+              type="button"
+              className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                filterMode === "favorites"
+                  ? "bg-accent text-accent-foreground"
+                  : "hover:bg-accent/50"
+              }`}
+              onClick={() => {
+                setFilterMode("favorites");
+                setSelectedCategory(null);
+                setSelectedFeed(null);
+              }}
+              data-tauri-drag-region={false}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate">收藏</span>
+              </div>
+            </button>
+          </div>
+
+          {/* Categories */}
+          {categories.map((category) => (
+            <div key={category.id} className="px-3 py-1">
+              <div className="px-3 py-0.5 text-[10px] font-semibold text-muted-foreground tracking-wide flex items-center justify-between gap-2 leading-tight">
+                <span className="truncate" title={category.name}>
+                  {category.name}
+                </span>
+                <button
+                  type="button"
+                  className="text-xs text-muted-foreground hover:text-destructive"
+                  onClick={() => handleDeleteCategory(category.id)}
+                  data-tauri-drag-region={false}
+                  aria-label="删除分类"
+                  title="删除分类"
+                >
+                  ✕
+                </button>
+              </div>
+              {/* Feeds under this category */}
+              {feeds
+                .filter((feed) => feed.category_id === category.id)
+                .map((feed) => (
+                  <button
+                    type="button"
+                    key={feed.id}
+                    className={`group w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                      selectedFeed === feed.id
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-accent/50"
+                    }`}
+                    onClick={() => {
+                      setSelectedFeed(feed.id);
+                      setSelectedCategory(null);
+                    }}
+                    data-tauri-drag-region={false}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate">{feed.title}</span>
+                      {unreadCounts.get(feed.id) ? (
+                        <span className="text-xs text-muted-foreground">
+                          {unreadCounts.get(feed.id)}
+                        </span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleDeleteFeed(feed.id);
+                        }}
+                        data-tauri-drag-region={false}
+                        aria-label="删除订阅源"
+                        title="删除订阅源"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </button>
+                ))}
+            </div>
+          ))}
+        </div>
+        {selectedFeed && (
+          <div className="border-t border-border p-3">
+            <div className="text-xs text-muted-foreground mb-2">订阅源分类</div>
+            <div className="flex gap-2">
+              <select
+                className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                value={selectedFeedCategoryId ?? ""}
+                onChange={(event) =>
+                  setSelectedFeedCategoryId(event.target.value || null)
+                }
+                data-tauri-drag-region={false}
+              >
+                <option value="">未分类</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                data-tauri-drag-region={false}
+                onClick={handleUpdateSelectedFeedCategory}
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+        )}
+        <div className="border-t border-border p-3">
+          <Button
+            variant={autoSyncEnabled ? "secondary" : "ghost"}
+            size="sm"
+            className="w-full"
+            data-tauri-drag-region={false}
+            onClick={() => setAutoSyncEnabled((value) => !value)}
+          >
+            {autoSyncEnabled ? "自动同步：开" : "自动同步：关"}
+          </Button>
+        </div>
+      </aside>
+
+      {/* Middle: Article List */}
+      <div className="w-[320px] min-w-[320px] border-r border-border bg-card flex flex-col">
+        {/* Search Bar */}
+        <div className="h-14 flex items-center px-4 border-b border-border gap-2">
+          <input
+            type="text"
+            placeholder="搜索文章..."
+            className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+            data-tauri-drag-region={false}
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            data-tauri-drag-region={false}
+          >
+            🔍
+          </Button>
+          <Button
+            size="sm"
+            className="ml-2"
+            data-tauri-drag-region={false}
+            onClick={handleSyncFeed}
+            disabled={syncLoading || !selectedFeed}
+          >
+            {syncLoading ? "抓取中" : "抓取"}
+          </Button>
+        </div>
+        {syncStatus && (
+          <div className="px-4 py-2 text-xs text-muted-foreground border-b border-border">
+            {syncStatus}
+          </div>
+        )}
+
+        {/* Article List */}
+        <div className="flex-1 overflow-y-auto">
+          {visibleArticles.map((article) => (
+            <button
+              type="button"
+              key={article.id}
+              className={`w-full text-left p-4 border-b border-border transition-colors ${
+                selectedArticle?.id === article.id
+                  ? "bg-accent"
+                  : "hover:bg-accent/50"
+              } ${article.is_read ? "opacity-60" : ""}`}
+              onClick={() => setSelectedArticle(article)}
+              data-tauri-drag-region={false}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <h3 className={`text-sm ${article.is_read ? "font-normal" : "font-semibold"} line-clamp-2`}>
+                  {article.title}
+                </h3>
+                  {article.is_favorite && <span>⭐</span>}
+                </div>
+              <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                {article.summary || ""}
+              </p>
+              <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
+                <span>{article.author || "Unknown"}</span>
+                <span>
+                  {article.pub_date ? new Date(article.pub_date).toLocaleDateString() : ""}
+                </span>
+              </div>
+            </button>
+          ))}
+          {!loading && visibleArticles.length === 0 && (
+            <div className="p-6 text-sm text-muted-foreground">
+              暂无文章，先添加一个订阅源。
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right: Article Reader */}
+      <main className="flex-1 bg-background flex flex-col min-w-0">
+        {selectedArticle ? (
+          <>
+            {/* Article Header */}
+            <header className="h-14 flex items-center px-6 border-b border-border justify-between">
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-tauri-drag-region={false}
+                  onClick={handleToggleRead}
+                >
+                  {selectedArticle.is_read ? "标为未读" : "标为已读"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-tauri-drag-region={false}
+                  onClick={handleToggleFavorite}
+                >
+                  {selectedArticle.is_favorite ? "取消收藏" : "收藏"}
+                </Button>
+              </div>
+              <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                <span>{readProgress.toFixed(0)}%</span>
+                {contentError && (
+                  <span className="text-destructive">{contentError}</span>
+                )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  data-tauri-drag-region={false}
+                >
+                  <a
+                    href={selectedArticle?.url || "#"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    原文链接 ↗
+                  </a>
+                </Button>
+              </div>
+            </header>
+
+            {/* Article Content */}
+            <article
+              className="flex-1 overflow-y-auto px-8 py-6"
+              data-tauri-drag-region={false}
+              ref={contentRef}
+            >
+              <h1 className="text-3xl font-bold mb-4">{selectedArticle.title}</h1>
+              <div className="flex items-center gap-4 text-sm text-muted-foreground mb-8">
+                <span>{selectedArticle.author || "Unknown"}</span>
+                <span>•</span>
+                <span>
+                  {selectedArticle.pub_date
+                    ? new Date(selectedArticle.pub_date).toLocaleString()
+                    : ""}
+                </span>
+              </div>
+              {contentLoading ? (
+                <div className="text-sm text-muted-foreground">正在加载全文...</div>
+              ) : (
+                <div className="space-y-4">
+                  {contentError && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-tauri-drag-region={false}
+                      onClick={() => fetchArticleContent(selectedArticle.id)}
+                    >
+                      重试全文抓取
+                    </Button>
+                  )}
+                  <div className="prose prose-lg max-w-none dark:prose-invert prose-pre:bg-neutral-900 prose-pre:text-neutral-100 prose-pre:rounded-lg prose-pre:px-4 prose-pre:py-3 prose-img:rounded-lg">
+                    {parse(contentHtml || selectedArticle.summary || "")}
+                  </div>
+                </div>
+              )}
+            </article>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-muted-foreground">
+            <div className="text-center">
+              <p className="text-lg mb-2">选择一篇文章开始阅读</p>
+              <p className="text-sm">或从左侧添加新的 RSS 订阅源</p>
+              {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default App;
