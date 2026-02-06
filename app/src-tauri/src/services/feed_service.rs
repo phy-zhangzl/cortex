@@ -45,6 +45,12 @@ impl FeedService {
     }
 
     fn parse_entry(&self, entry: feed_rs::model::Entry) -> ParsedEntry {
+        // Use updated time if available (for updated articles), otherwise use published time
+        let pub_date = entry
+            .updated
+            .or(entry.published)
+            .map(|d| d.to_utc());
+
         ParsedEntry {
             title: entry
                 .title
@@ -56,7 +62,7 @@ impl FeedService {
                 .map(|l| l.href.clone())
                 .unwrap_or_default(),
             author: entry.authors.first().map(|p| p.name.clone()),
-            pub_date: entry.published.map(|d| d.to_utc()),
+            pub_date,
             summary: entry.summary.map(|s| s.content),
             content: entry.content.and_then(|c| c.body),
         }
