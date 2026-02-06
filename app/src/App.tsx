@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { useDataStore } from "@/store/useDataStore";
@@ -19,6 +20,8 @@ function App() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [feedTitle, setFeedTitle] = useState("");
   const [feedUrl, setFeedUrl] = useState("");
+  const [feedSourceType, setFeedSourceType] = useState<"rss" | "web_api">("rss");
+  const [feedSourceConfig, setFeedSourceConfig] = useState("");
   const [feedSiteUrl, setFeedSiteUrl] = useState("");
   const [feedCategoryId, setFeedCategoryId] = useState<string | null>(null);
   const [editingFeedId, setEditingFeedId] = useState<string | null>(null);
@@ -58,6 +61,7 @@ function App() {
   const [contentLoading, setContentLoading] = useState(false);
   const [contentHtml, setContentHtml] = useState<string>("");
   const [contentError, setContentError] = useState<string | null>(null);
+  const [contentSource, setContentSource] = useState<"full" | "summary" | null>(null);
   const [readProgress, setReadProgress] = useState(0);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -295,9 +299,13 @@ function App() {
     if (!selectedArticle) {
       return null;
     }
-    const source = contentHtml || selectedArticle.summary || "";
+    const source = contentHtml || "";
     const plain = source.replace(/<[^>]*>/g, " ");
-    return estimateReadMinutes(plain);
+    const trimmed = plain.trim();
+    if (!trimmed) {
+      return null;
+    }
+    return estimateReadMinutes(trimmed);
   }, [contentHtml, estimateReadMinutes, selectedArticle]);
 
   const handleLoadMore = () => {
@@ -354,10 +362,10 @@ function App() {
     }
   };
 
-  const handleAddArxivFeed = async () => {
+  const handleAddQqAuthorSample = async () => {
     try {
       setSeedLoading(true);
-      setSeedStatus("正在添加 arXiv cs.AI...");
+      setSeedStatus("正在添加腾讯作者源...");
 
       const existingCategory = categories[0];
       const category = existingCategory || (await createCategory("未分类", null));
@@ -367,10 +375,9 @@ function App() {
       }
 
       const feed = await createFeed({
-        title: "arXiv cs.AI",
-        url: "https://export.arxiv.org/rss/cs.AI",
-        siteUrl: "https://arxiv.org/list/cs.AI/recent",
-        description: "arXiv cs.AI 分类",
+        title: "阿里技术（腾讯作者）",
+        url: "https://news.qq.com/omn/author/8QMf13xV64IUuQ%3D%3D",
+        description: "腾讯新闻作者页（Web API）",
         categoryId: category.id,
       });
 
@@ -380,9 +387,9 @@ function App() {
       }
 
       await reloadAll();
-      setSeedStatus("arXiv cs.AI 已添加");
+      setSeedStatus("腾讯作者源已添加，可直接抓取测试");
     } catch (error) {
-      console.error("Add arXiv feed failed", error);
+      console.error("Add QQ source failed", error);
       setSeedStatus(`失败: ${String(error)}`);
     } finally {
       setSeedLoading(false);
@@ -392,6 +399,8 @@ function App() {
   const resetFeedForm = () => {
     setFeedTitle("");
     setFeedUrl("");
+    setFeedSourceType("rss");
+    setFeedSourceConfig("");
     setFeedSiteUrl("");
     setFeedCategoryId(null);
     setEditingFeedId(null);
@@ -421,6 +430,8 @@ function App() {
     setEditingFeedId(feed.id);
     setFeedTitle(feed.title);
     setFeedUrl(feed.url);
+    setFeedSourceType(feed.source_type === "web_api" ? "web_api" : "rss");
+    setFeedSourceConfig(feed.source_config ?? "");
     setFeedSiteUrl(feed.site_url ?? "");
     setFeedCategoryId(feed.category_id ?? null);
     setSeedStatus(null);
@@ -433,25 +444,47 @@ function App() {
 
   const handleSaveFeed = async () => {
     if (!feedTitle.trim() || !feedUrl.trim()) {
-      setSeedStatus("请填写标题和 RSS 地址");
+      setSeedStatus("请填写标题和源地址");
       return;
     }
 
     const urlText = feedUrl.trim();
     if (urlText.startsWith("<")) {
-      setSeedStatus("RSS 地址需要填写 URL，不是 XML 内容");
+      setSeedStatus("源地址需要填写 URL，不是 XML 内容");
       return;
     }
 
     try {
       const parsedUrl = new URL(urlText);
       if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-        setSeedStatus("RSS 地址必须是 http/https URL");
+        setSeedStatus("源地址必须是 http/https URL");
         return;
       }
     } catch {
-      setSeedStatus("请填写有效的 RSS URL，例如 https://baoyu.io/feed.xml");
+      setSeedStatus("请填写有效 URL，例如 https://baoyu.io/feed.xml");
       return;
+    }
+
+    const normalizedSourceConfig = feedSourceConfig.trim();
+    const isQqAuthorUrl = (() => {
+      try {
+        const parsed = new URL(urlText);
+        return parsed.hostname === "news.qq.com" && parsed.pathname.startsWith("/omn/author/");
+      } catch {
+        return false;
+      }
+    })();
+    if (feedSourceType === "web_api" && !normalizedSourceConfig && !isQqAuthorUrl) {
+      setSeedStatus("Web API 源请填写 JSON 配置（腾讯作者页可留空）");
+      return;
+    }
+    if (feedSourceType === "web_api" && normalizedSourceConfig) {
+      try {
+        JSON.parse(normalizedSourceConfig);
+      } catch {
+        setSeedStatus("Web API 配置必须是合法 JSON");
+        return;
+      }
     }
 
     try {
@@ -472,6 +505,8 @@ function App() {
             feedId: editingFeedId,
             title: feedTitle.trim(),
             url: urlText,
+            sourceType: feedSourceType,
+            sourceConfig: normalizedSourceConfig || null,
             siteUrl: feedSiteUrl.trim() || null,
             description: null,
             categoryId: feedCategoryId ?? category.id,
@@ -479,6 +514,8 @@ function App() {
         : await createFeed({
             title: feedTitle.trim(),
             url: urlText,
+            sourceType: feedSourceType,
+            sourceConfig: normalizedSourceConfig || null,
             siteUrl: feedSiteUrl.trim() || null,
             description: null,
             categoryId: feedCategoryId ?? category.id,
@@ -503,6 +540,31 @@ function App() {
     }
   };
 
+  const handleDetectSourceConfig = async () => {
+    const urlText = feedUrl.trim();
+    if (!urlText) {
+      setSeedStatus("请先填写源地址 URL");
+      return;
+    }
+    try {
+      const result = await invoke<{ sourceType?: string; sourceConfig?: unknown }>(
+        "suggest_source_config",
+        { url: urlText }
+      );
+      const sourceType = result?.sourceType === "web_api" ? "web_api" : "rss";
+      setFeedSourceType(sourceType);
+      if (result?.sourceConfig && result.sourceConfig !== null) {
+        setFeedSourceConfig(JSON.stringify(result.sourceConfig, null, 2));
+        setSeedStatus("已自动生成 Web API 配置");
+      } else {
+        setFeedSourceConfig("");
+        setSeedStatus("未识别到特殊站点，按 RSS/Atom 处理");
+      }
+    } catch (error) {
+      setSeedStatus(`自动识别失败: ${String(error)}`);
+    }
+  };
+
   const handleSyncFeed = async () => {
     if (!selectedFeed) {
       setSyncStatus("请选择一个订阅源");
@@ -511,7 +573,7 @@ function App() {
 
     try {
       setSyncLoading(true);
-      setSyncStatus("正在抓取 RSS...");
+      setSyncStatus("正在抓取内容源...");
       const inserted = await fetchFeedArticles(selectedFeed, {
         refreshLimit: articleLimit,
       });
@@ -769,17 +831,287 @@ function App() {
     target.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [buildHeadingSelector]);
 
-  const buildContentHtml = useCallback((html: string) => {
+  const buildContentHtml = useCallback((html: string, baseUrl?: string) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
+    const isWechat = (() => {
+      if (baseUrl?.includes("mp.weixin.qq.com")) {
+        return true;
+      }
+      if (baseUrl?.includes("wechat2rss.")) {
+        return true;
+      }
+      return Boolean(doc.querySelector("#js_content, .rich_media_content"));
+    })();
+
+    const simplifyToMinimal = () => {
+      const allowed = new Set([
+        "article",
+        "section",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "blockquote",
+        "pre",
+        "code",
+        "ul",
+        "ol",
+        "li",
+        "strong",
+        "em",
+        "b",
+        "i",
+        "hr",
+        "br",
+        "a",
+        "img",
+      ]);
+
+      const elements = Array.from(doc.body.querySelectorAll("*"));
+      elements.forEach((el) => {
+        const tag = el.tagName.toLowerCase();
+        if (!allowed.has(tag)) {
+          const parent = el.parentNode;
+          if (!parent) {
+            return;
+          }
+          while (el.firstChild) {
+            parent.insertBefore(el.firstChild, el);
+          }
+          parent.removeChild(el);
+          return;
+        }
+
+        const attrs = Array.from(el.attributes).map((a) => a.name);
+        attrs.forEach((name) => {
+          if (
+            name === "href" ||
+            name === "src" ||
+            name === "alt" ||
+            name === "title" ||
+            name === "width" ||
+            name === "height"
+          ) {
+            return;
+          }
+          el.removeAttribute(name);
+        });
+      });
+
+      Array.from(doc.body.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6, blockquote")).forEach(
+        (el) => {
+          if (!(el.textContent || "").trim() && !el.querySelector("img, code")) {
+            el.remove();
+          }
+        }
+      );
+
+      const promoKeywords = [
+        "关注",
+        "公众号",
+        "扫码",
+        "二维码",
+        "广告",
+        "推广",
+        "赞助",
+        "原创",
+        "大淘宝技术引领新消费",
+      ];
+
+      Array.from(doc.body.querySelectorAll("p, div, section, aside, figure, figcaption")).forEach((el) => {
+        const text = (el.textContent || "").replace(/\s+/g, "").trim();
+        if (!text) {
+          return;
+        }
+        const hit = promoKeywords.some((k) => text.includes(k));
+        if (hit && text.length <= 120) {
+          el.remove();
+        }
+      });
+
+      Array.from(doc.body.querySelectorAll("img")).forEach((img) => {
+        const hint = [img.getAttribute("alt"), img.getAttribute("title"), img.getAttribute("src")]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        const hit =
+          hint.includes("logo") ||
+          hint.includes("qrcode") ||
+          hint.includes("qr") ||
+          hint.includes("banner") ||
+          hint.includes("ad") ||
+          hint.includes("promo");
+        if (hit) {
+          img.remove();
+          return;
+        }
+
+        const textAround = ((img.parentElement?.textContent || "") + " " +
+          (img.closest("figure")?.textContent || ""))
+          .replace(/\s+/g, "")
+          .trim();
+        if (
+          promoKeywords.some((k) => textAround.includes(k)) &&
+          textAround.length <= 120
+        ) {
+          img.remove();
+        }
+      });
+
+      const removeLeadingPromoBlocks = () => {
+        const children = Array.from(doc.body.children);
+        let removed = 0;
+        for (const node of children) {
+          if (removed >= 2) {
+            break;
+          }
+          const text = (node.textContent || "").replace(/\s+/g, "").trim();
+          const images = node.querySelectorAll("img").length;
+          const hasParagraph = node.querySelectorAll("p").length > 0;
+          const isLikelyHeroImageBlock = images > 0 && (!text || text.length < 40) && !hasParagraph;
+          const hasPromoText = promoKeywords.some((k) => text.includes(k));
+
+          if (isLikelyHeroImageBlock || hasPromoText) {
+            node.remove();
+            removed += 1;
+            continue;
+          }
+
+          if (text.length > 80 || hasParagraph) {
+            break;
+          }
+        }
+      };
+
+      removeLeadingPromoBlocks();
+    };
+
+    if (isWechat) {
+      doc.body.setAttribute("data-source", "wechat");
+      const main = doc.querySelector("#js_content, .rich_media_content");
+      if (main && main.innerHTML.trim()) {
+        doc.body.innerHTML = main.innerHTML;
+        doc.body.setAttribute("data-source", "wechat");
+      }
+      const junkSelectors = [
+        "script",
+        "style",
+        "noscript",
+        "iframe",
+        ".rich_media_title",
+        ".rich_media_meta_list",
+        ".rich_media_tool",
+        ".rich_media_area_extra",
+        ".original_area_primary",
+        ".js_recommend_list",
+        "#meta_content",
+        "#js_tags",
+        "#js_pc_qr_code",
+      ];
+      junkSelectors.forEach((selector) => {
+        doc.querySelectorAll(selector).forEach((node) => {
+          node.remove();
+        });
+      });
+      doc.querySelectorAll("[style*='display:none'], [hidden]").forEach((node) => {
+        node.remove();
+      });
+
+      const allElements = Array.from(doc.body.querySelectorAll("*"));
+      allElements.forEach((el) => {
+        if (el.tagName === "PRE" || el.tagName === "CODE") {
+          return;
+        }
+        el.removeAttribute("style");
+        el.removeAttribute("class");
+        if (el.tagName !== "A" && el.tagName !== "IMG") {
+          el.removeAttribute("id");
+        }
+      });
+
+      doc.body.removeAttribute("style");
+      doc.body.removeAttribute("class");
+      simplifyToMinimal();
+    }
+
+    const toAbsoluteUrl = (value: string | null) => {
+      if (!value) {
+        return null;
+      }
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return null;
+      }
+      if (!baseUrl) {
+        return trimmed;
+      }
+      try {
+        return new URL(trimmed, baseUrl).toString();
+      } catch {
+        return trimmed;
+      }
+    };
+
     const images = Array.from(doc.querySelectorAll("img"));
     images.forEach((img) => {
+      const srcCandidate =
+        img.getAttribute("src") ||
+        img.getAttribute("data-src") ||
+        img.getAttribute("data-original") ||
+        img.getAttribute("data-actualsrc") ||
+        img.getAttribute("data-lazy-src");
+      const resolvedSrc = toAbsoluteUrl(srcCandidate);
+      if (resolvedSrc) {
+        img.setAttribute("src", resolvedSrc);
+      }
+      img.removeAttribute("data-src");
+      img.removeAttribute("data-original");
+      img.removeAttribute("data-actualsrc");
+      img.removeAttribute("data-lazy-src");
       img.setAttribute("loading", "lazy");
       img.setAttribute("decoding", "async");
+      if (!img.getAttribute("referrerpolicy")) {
+        img.setAttribute("referrerpolicy", "no-referrer");
+      }
+
+      const width = Number.parseInt(img.getAttribute("width") || "", 10);
+      const height = Number.parseInt(img.getAttribute("height") || "", 10);
+      const isSmallByAttr =
+        (Number.isFinite(width) && width > 0 && width <= 320) ||
+        (Number.isFinite(height) && height > 0 && height <= 140);
+
+      const hint = `${img.getAttribute("alt") || ""} ${img.getAttribute("title") || ""} ${
+        img.getAttribute("src") || ""
+      }`.toLowerCase();
+      const isLikelyFormulaByHint =
+        hint.includes("latex") || hint.includes("katex") || hint.includes("math") || hint.includes("formula");
+
+      const parent = img.parentElement;
+      let hasNearbyText = false;
+      if (parent && ["P", "LI", "SPAN", "DIV"].includes(parent.tagName)) {
+        const clone = parent.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll("img").forEach((node) => {
+          node.remove();
+        });
+        const text = (clone.textContent || "").replace(/\s+/g, "").trim();
+        hasNearbyText = text.length >= 6;
+      }
+
+      if (isSmallByAttr || isLikelyFormulaByHint || hasNearbyText) {
+        img.setAttribute("data-inline-formula", "true");
+      }
     });
 
     const anchors = Array.from(doc.querySelectorAll("a"));
     anchors.forEach((a) => {
+      const resolvedHref = toAbsoluteUrl(a.getAttribute("href"));
+      if (resolvedHref) {
+        a.setAttribute("href", resolvedHref);
+      }
       a.setAttribute("target", "_blank");
       a.setAttribute("rel", "noopener noreferrer");
     });
@@ -801,13 +1133,18 @@ function App() {
       heading.setAttribute("id", id);
     });
 
-    return doc.body.innerHTML;
+    const cleaned = doc.body.innerHTML;
+    if (isWechat) {
+      return `<div data-source="wechat">${cleaned}</div>`;
+    }
+    return cleaned;
   }, []);
 
   useEffect(() => {
     if (!selectedArticle) {
       setContentHtml("");
       setContentError(null);
+      setContentSource(null);
       setReadProgress(0);
       setAiError(null);
       setIsTocOpen(false);
@@ -820,9 +1157,10 @@ function App() {
       setContentError(null);
       setAiError(null);
       if (selectedArticle.content) {
-        const html = buildContentHtml(selectedArticle.content);
+        const html = buildContentHtml(selectedArticle.content, selectedArticle.url);
         if (!cancelled) {
           setContentHtml(html);
+          setContentSource("full");
           setContentLoading(false);
         }
         return;
@@ -834,10 +1172,19 @@ function App() {
       }
 
       if (article?.content) {
-        setContentHtml(buildContentHtml(article.content));
+        setContentHtml(buildContentHtml(article.content, article.url || selectedArticle.url));
+        setContentSource("full");
       } else {
-        setContentHtml(selectedArticle.summary || "");
-        setContentError(useDataStore.getState().error || "全文抓取失败");
+        const fallback = article?.summary || selectedArticle.summary || "";
+        setContentHtml(fallback);
+        setContentSource(fallback.trim() ? "summary" : null);
+        if (!article) {
+          setContentError(useDataStore.getState().error || "全文抓取失败");
+        } else if (!fallback.trim()) {
+          setContentError("文章暂无可显示内容");
+        } else {
+          setContentError(null);
+        }
       }
       setContentLoading(false);
     };
@@ -1100,12 +1447,41 @@ function App() {
                   />
                   <input
                     type="text"
-                    placeholder="RSS 地址 (必填)"
+                    placeholder="源地址 URL (必填)"
                     value={feedUrl}
                     onChange={(event) => setFeedUrl(event.target.value)}
                     className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
                     data-tauri-drag-region={false}
                   />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-tauri-drag-region={false}
+                    onClick={handleDetectSourceConfig}
+                    disabled={seedLoading}
+                  >
+                    自动识别来源类型
+                  </Button>
+                  <select
+                    className="no-drag w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                    value={feedSourceType}
+                    onChange={(event) =>
+                      setFeedSourceType(event.target.value === "web_api" ? "web_api" : "rss")
+                    }
+                    data-tauri-drag-region={false}
+                  >
+                    <option value="rss">RSS / Atom</option>
+                    <option value="web_api">Web API（通用 JSON）</option>
+                  </select>
+                  {feedSourceType === "web_api" && (
+                    <textarea
+                      placeholder='Web API JSON 配置（可选）\nGET 示例：{"provider":"generic_json","endpoint":"https://example.com/api/posts","query":{"limit":"20"},"items_path":"data.items","fields":{"title":"title","url":"url","summary":"summary","pub_date":"published_at"}}\nPOST 分页示例：{"provider":"generic_json","method":"POST","endpoint":"https://cloud.tencent.com/developer/api/column/getArticlesByColumnId","body":{"pageNumber":"{{next}}","columnId":5286,"tagId":-1,"keyword":""},"items_path":"list","fields":{"title":"title","url":"url","url_template":"https://cloud.tencent.com/developer/article/{{articleId}}","summary":"summary","pub_date":"createTime"},"pagination":{"mode":"page_number","start":"1","max_pages":20}}'
+                      value={feedSourceConfig}
+                      onChange={(event) => setFeedSourceConfig(event.target.value)}
+                      className="no-drag min-h-20 w-full bg-background border border-border rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-ring"
+                      data-tauri-drag-region={false}
+                    />
+                  )}
                   <input
                     type="text"
                     placeholder="站点地址 (可选)"
@@ -1157,10 +1533,10 @@ function App() {
               <button
                 type="button"
                 className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
-                onClick={handleAddArxivFeed}
+                onClick={handleAddQqAuthorSample}
                 data-tauri-drag-region={false}
               >
-                添加 arXiv cs.AI 订阅
+                添加腾讯作者测试源
               </button>
               <button
                 type="button"
@@ -1795,7 +2171,7 @@ function App() {
                     {readMinutes !== null && (
                       <>
                         <span>•</span>
-                        <span>约 {readMinutes} 分钟</span>
+                        <span>{contentSource === "summary" ? `摘要约 ${readMinutes} 分钟` : `约 ${readMinutes} 分钟`}</span>
                       </>
                     )}
                   </div>
