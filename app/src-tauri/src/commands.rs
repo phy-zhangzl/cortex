@@ -595,11 +595,8 @@ pub async fn fetch_feed_articles(
             continue;
         }
 
-        if let (Some(last_fetch_at), Some(pub_date)) = (feed.last_fetch_at, entry.pub_date) {
-            if pub_date <= last_fetch_at {
-                continue;
-            }
-        }
+        // Note: Removed date-based filtering as it incorrectly skips valid articles.
+        // URL uniqueness check below is sufficient to avoid duplicates.
 
         if is_arxiv {
             let summary_text = entry
