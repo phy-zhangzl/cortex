@@ -12,6 +12,8 @@ export interface Feed {
   id: string;
   title: string;
   url: string;
+  source_type?: string;
+  source_config?: string | null;
   site_url?: string | null;
   description?: string | null;
   category_id?: string | null;
@@ -54,6 +56,8 @@ interface DataState {
   createFeed: (payload: {
     title: string;
     url: string;
+    sourceType?: string;
+    sourceConfig?: string | null;
     siteUrl?: string | null;
     description?: string | null;
     categoryId?: string | null;
@@ -62,6 +66,8 @@ interface DataState {
     feedId: string;
     title: string;
     url: string;
+    sourceType?: string;
+    sourceConfig?: string | null;
     siteUrl?: string | null;
     description?: string | null;
     categoryId?: string | null;
@@ -143,11 +149,13 @@ export const useDataStore = create<DataState>((set, get) => ({
       return false;
     }
   },
-  createFeed: async ({ title, url, siteUrl, description, categoryId }) => {
+  createFeed: async ({ title, url, sourceType, sourceConfig, siteUrl, description, categoryId }) => {
     try {
       const feed = await invoke<Feed>("create_feed", {
         title,
         url,
+        sourceType: sourceType ?? null,
+        sourceConfig: sourceConfig ?? null,
         siteUrl: siteUrl ?? null,
         description: description ?? null,
         categoryId: categoryId ?? null,
@@ -159,12 +167,14 @@ export const useDataStore = create<DataState>((set, get) => ({
       return null;
     }
   },
-  updateFeed: async ({ feedId, title, url, siteUrl, description, categoryId }) => {
+  updateFeed: async ({ feedId, title, url, sourceType, sourceConfig, siteUrl, description, categoryId }) => {
     try {
       const feed = await invoke<Feed>("update_feed", {
         feedId,
         title,
         url,
+        sourceType: sourceType ?? null,
+        sourceConfig: sourceConfig ?? null,
         siteUrl: siteUrl ?? null,
         description: description ?? null,
         categoryId: categoryId ?? null,
@@ -234,6 +244,7 @@ export const useDataStore = create<DataState>((set, get) => ({
         articleId,
       });
       set({
+        error: null,
         articles: get().articles.map((item) =>
           item.id === articleId ? article : item
         ),

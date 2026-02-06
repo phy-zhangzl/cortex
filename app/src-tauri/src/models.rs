@@ -16,6 +16,8 @@ pub struct Feed {
     pub id: String,
     pub title: String,
     pub url: String,
+    pub source_type: String,
+    pub source_config: Option<String>,
     pub site_url: Option<String>,
     pub description: Option<String>,
     pub category_id: Option<String>,

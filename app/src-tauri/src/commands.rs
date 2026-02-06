@@ -1,14 +1,68 @@
 use crate::models::{Article, Category, Feed};
 use crate::services::content_service::ContentService;
 use crate::services::feed_service::FeedService;
+use crate::services::feed_service::ParsedEntry;
+use crate::services::web_source_service::{GenericJsonConfig, WebSourceService};
 use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tauri::State;
 use uuid::Uuid;
 
+const FEED_SOURCE_RSS: &str = "rss";
+const FEED_SOURCE_WEB_API: &str = "web_api";
+
 pub struct AppState {
     pub pool: SqlitePool,
+}
+
+#[tauri::command]
+pub async fn suggest_source_config(url: String) -> Result<Value, String> {
+    if let Some(guest_suid) = extract_qq_guest_suid(&url) {
+        return Ok(json!({
+            "sourceType": FEED_SOURCE_WEB_API,
+            "sourceConfig": {
+                "provider": "qq_author",
+                "guest_suid": guest_suid,
+                "tab_id": "om_article"
+            }
+        }));
+    }
+
+    if let Some(column_id) = extract_tencent_column_id(&url) {
+        return Ok(json!({
+            "sourceType": FEED_SOURCE_WEB_API,
+            "sourceConfig": {
+                "provider": "generic_json",
+                "method": "POST",
+                "endpoint": "https://cloud.tencent.com/developer/api/column/getArticlesByColumnId",
+                "body": {
+                    "pageNumber": "{{next}}",
+                    "columnId": column_id,
+                    "tagId": -1,
+                    "keyword": ""
+                },
+                "items_path": "list",
+                "fields": {
+                    "title": "title",
+                    "url": "url",
+                    "url_template": "https://cloud.tencent.com/developer/article/{{articleId}}",
+                    "summary": "summary",
+                    "pub_date": "createTime"
+                },
+                "pagination": {
+                    "mode": "page_number",
+                    "start": "1",
+                    "max_pages": 20
+                }
+            }
+        }));
+    }
+
+    Ok(json!({
+        "sourceType": FEED_SOURCE_RSS,
+        "sourceConfig": Value::Null
+    }))
 }
 
 #[tauri::command]
@@ -104,7 +158,7 @@ pub async fn delete_category(
 #[tauri::command]
 pub async fn list_feeds(state: State<'_, AppState>) -> Result<Vec<Feed>, String> {
     let feeds = sqlx::query_as::<_, Feed>(
-        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds ORDER BY created_at DESC",
+        "SELECT id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds ORDER BY created_at DESC",
     )
     .fetch_all(&state.pool)
     .await
@@ -121,6 +175,8 @@ pub async fn create_feed(
     site_url: Option<String>,
     description: Option<String>,
     category_id: Option<String>,
+    source_type: Option<String>,
+    source_config: Option<String>,
 ) -> Result<Feed, String> {
     let existing: Option<String> = sqlx::query_scalar("SELECT id FROM feeds WHERE url = ? LIMIT 1")
         .bind(&url)
@@ -134,13 +190,16 @@ pub async fn create_feed(
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
+    let (source_type, source_config) = normalize_source_config(&url, source_type, source_config);
 
     sqlx::query(
-        "INSERT INTO feeds (id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?)",
+        "INSERT INTO feeds (id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?)",
     )
     .bind(&id)
     .bind(&title)
     .bind(&url)
+    .bind(&source_type)
+    .bind(&source_config)
     .bind(&site_url)
     .bind(&description)
     .bind(&category_id)
@@ -155,6 +214,8 @@ pub async fn create_feed(
         id,
         title,
         url,
+        source_type,
+        source_config,
         site_url,
         description,
         category_id,
@@ -177,6 +238,8 @@ pub async fn update_feed(
     site_url: Option<String>,
     description: Option<String>,
     category_id: Option<String>,
+    source_type: Option<String>,
+    source_config: Option<String>,
 ) -> Result<Feed, String> {
     let existing: Option<String> =
         sqlx::query_scalar("SELECT id FROM feeds WHERE url = ? AND id != ? LIMIT 1")
@@ -190,12 +253,15 @@ pub async fn update_feed(
         return Err("订阅源已存在".to_string());
     }
 
+    let (source_type, source_config) = normalize_source_config(&url, source_type, source_config);
     let now = Utc::now();
     sqlx::query(
-        "UPDATE feeds SET title = ?, url = ?, site_url = ?, description = ?, category_id = ?, updated_at = ? WHERE id = ?",
+        "UPDATE feeds SET title = ?, url = ?, source_type = ?, source_config = ?, site_url = ?, description = ?, category_id = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&title)
     .bind(&url)
+    .bind(&source_type)
+    .bind(&source_config)
     .bind(&site_url)
     .bind(&description)
     .bind(&category_id)
@@ -206,7 +272,7 @@ pub async fn update_feed(
     .map_err(|e| e.to_string())?;
 
     let updated = sqlx::query_as::<_, Feed>(
-        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+        "SELECT id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
     )
     .bind(&feed_id)
     .fetch_one(&state.pool)
@@ -232,7 +298,7 @@ pub async fn update_feed_category(
         .map_err(|e| e.to_string())?;
 
     let updated = sqlx::query_as::<_, Feed>(
-        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+        "SELECT id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
     )
     .bind(&feed_id)
     .fetch_one(&state.pool)
@@ -258,7 +324,7 @@ pub async fn update_feed_favicon(
         .map_err(|e| e.to_string())?;
 
     let updated = sqlx::query_as::<_, Feed>(
-        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+        "SELECT id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
     )
     .bind(&feed_id)
     .fetch_one(&state.pool)
@@ -338,7 +404,7 @@ pub async fn fetch_article_content(
         Ok(content) => content,
         Err(error) => {
             eprintln!("Failed to extract content for {}: {}", article.url, error);
-            return Ok(article);
+            return Err(format!("全文抓取失败: {}", error));
         }
     };
     content.retain(|ch| {
@@ -561,21 +627,28 @@ pub async fn fetch_feed_articles(
     limit: Option<i64>,
 ) -> Result<i64, String> {
     let feed = sqlx::query_as::<_, Feed>(
-        "SELECT id, title, url, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
+        "SELECT id, title, url, source_type, source_config, site_url, description, category_id, favicon_url, last_fetch_at, last_fetch_error, fetch_error_count, is_active, created_at, updated_at FROM feeds WHERE id = ?",
     )
     .bind(&feed_id)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    let service = FeedService::new();
-    let parsed = match service.fetch_and_parse(&feed.url).await {
-        Ok(parsed) => parsed,
+    let max_entries = limit.unwrap_or(30) as usize;
+    let source_type = feed.source_type.as_str();
+    let entries = if source_type == FEED_SOURCE_WEB_API {
+        fetch_web_source_entries(&feed, max_entries).await
+    } else {
+        fetch_rss_entries(&feed, max_entries).await
+    };
+
+    let entries = match entries {
+        Ok(items) => items,
         Err(error) => {
             sqlx::query(
                 "UPDATE feeds SET last_fetch_error = ?, fetch_error_count = fetch_error_count + 1, updated_at = ? WHERE id = ?",
             )
-            .bind(error.to_string())
+            .bind(error.clone())
             .bind(Utc::now())
             .bind(&feed_id)
             .execute(&state.pool)
@@ -585,18 +658,75 @@ pub async fn fetch_feed_articles(
         }
     };
 
-    let max_entries = limit.unwrap_or(30) as usize;
-    let mut inserted: i64 = 0;
+    let inserted = insert_entries(&state.pool, &feed, entries, max_entries).await?;
 
+    sqlx::query(
+        "UPDATE feeds SET last_fetch_at = ?, last_fetch_error = NULL, fetch_error_count = 0, updated_at = ? WHERE id = ?",
+    )
+    .bind(Utc::now())
+    .bind(Utc::now())
+    .bind(&feed_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(inserted)
+}
+
+async fn fetch_rss_entries(feed: &Feed, max_entries: usize) -> Result<Vec<ParsedEntry>, String> {
+    let service = FeedService::new();
+    let parsed = service
+        .fetch_and_parse(&feed.url)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(parsed.entries.into_iter().take(max_entries).collect())
+}
+
+async fn fetch_web_source_entries(feed: &Feed, max_entries: usize) -> Result<Vec<ParsedEntry>, String> {
+    let config = feed.source_config.as_deref().unwrap_or("{}");
+    let value: Value = serde_json::from_str(config).map_err(|e| format!("source_config 无效: {e}"))?;
+    let provider = value["provider"].as_str().unwrap_or("");
+
+    let service = WebSourceService::new();
+
+    if provider == "generic_json" {
+        let mut generic: GenericJsonConfig =
+            serde_json::from_value(value).map_err(|e| format!("generic_json 配置无效: {e}"))?;
+        if generic.endpoint.trim().is_empty() {
+            generic.endpoint = feed.url.clone();
+        }
+        let generic = generic.normalized();
+        return service
+            .fetch_generic_json(&generic, max_entries)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
+    if provider != "qq_author" {
+        return Err(format!("不支持的 web_api provider: {provider}"));
+    }
+
+    let guest_suid = value["guest_suid"].as_str().ok_or_else(|| "缺少 guest_suid 配置".to_string())?;
+    let tab_id = value["tab_id"].as_str().unwrap_or("om_article");
+    service
+        .fetch_qq_author_articles(guest_suid, tab_id, max_entries)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn insert_entries(
+    pool: &SqlitePool,
+    feed: &Feed,
+    entries: Vec<ParsedEntry>,
+    max_entries: usize,
+) -> Result<i64, String> {
+    let mut inserted: i64 = 0;
     let is_arxiv = feed.url.contains("arxiv.org/rss") || feed.url.contains("export.arxiv.org/rss");
 
-    for entry in parsed.entries.into_iter().take(max_entries) {
+    for entry in entries.into_iter().take(max_entries) {
         if entry.url.is_empty() {
             continue;
         }
-
-        // Note: Removed date-based filtering as it incorrectly skips valid articles.
-        // URL uniqueness check below is sufficient to avoid duplicates.
 
         if is_arxiv {
             let summary_text = entry
@@ -605,9 +735,7 @@ pub async fn fetch_feed_articles(
                 .or(entry.content.as_deref())
                 .unwrap_or("");
             let summary_lower = summary_text.to_lowercase();
-            if !summary_lower.contains("large language model")
-                || summary_lower.contains("biology")
-            {
+            if !summary_lower.contains("large language model") || summary_lower.contains("biology") {
                 continue;
             }
         }
@@ -615,9 +743,9 @@ pub async fn fetch_feed_articles(
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM articles WHERE feed_id = ? AND url = ? LIMIT 1",
         )
-        .bind(&feed_id)
+        .bind(&feed.id)
         .bind(&entry.url)
-        .fetch_optional(&state.pool)
+        .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -626,10 +754,7 @@ pub async fn fetch_feed_articles(
         }
 
         let now = Utc::now();
-        let summary = entry
-            .summary
-            .clone()
-            .or_else(|| entry.content.clone());
+        let summary = entry.summary.clone().or_else(|| entry.content.clone());
         let content = entry.content.clone().filter(|value| !value.trim().is_empty());
         let content_extracted = content.is_some();
 
@@ -637,7 +762,7 @@ pub async fn fetch_feed_articles(
             "INSERT INTO articles (id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(Uuid::new_v4().to_string())
-        .bind(&feed_id)
+        .bind(&feed.id)
         .bind(&entry.title)
         .bind(&entry.url)
         .bind(&entry.author)
@@ -651,22 +776,83 @@ pub async fn fetch_feed_articles(
         .bind(now)
         .bind(now)
         .bind(now)
-        .execute(&state.pool)
+        .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
 
         inserted += 1;
     }
 
-    sqlx::query(
-        "UPDATE feeds SET last_fetch_at = ?, last_fetch_error = NULL, fetch_error_count = 0, updated_at = ? WHERE id = ?",
-    )
-    .bind(Utc::now())
-    .bind(Utc::now())
-    .bind(&feed_id)
-    .execute(&state.pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
     Ok(inserted)
+}
+
+fn normalize_source_config(
+    url: &str,
+    source_type: Option<String>,
+    source_config: Option<String>,
+) -> (String, Option<String>) {
+    let source_type = source_type.unwrap_or_else(|| FEED_SOURCE_RSS.to_string());
+    if source_type == FEED_SOURCE_WEB_API {
+        if source_config.is_none() {
+            if let Some(guest_suid) = extract_qq_guest_suid(url) {
+                let config = json!({
+                    "provider": "qq_author",
+                    "guest_suid": guest_suid,
+                    "tab_id": "om_article"
+                });
+                return (source_type, Some(config.to_string()));
+            }
+        }
+        return (source_type, source_config);
+    }
+
+    if let Some(guest_suid) = extract_qq_guest_suid(url) {
+        let config = json!({
+            "provider": "qq_author",
+            "guest_suid": guest_suid,
+            "tab_id": "om_article"
+        });
+        return (FEED_SOURCE_WEB_API.to_string(), Some(config.to_string()));
+    }
+
+    (source_type, source_config)
+}
+
+fn extract_qq_guest_suid(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.domain() != Some("news.qq.com") {
+        return None;
+    }
+    let mut segments = parsed.path_segments()?;
+    let first = segments.next()?;
+    let second = segments.next()?;
+    let third = segments.next()?;
+    if first != "omn" || second != "author" {
+        return None;
+    }
+    let normalized = third
+        .replace("%3D", "=")
+        .replace("%3d", "=")
+        .replace("%2B", "+")
+        .replace("%2b", "+");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn extract_tencent_column_id(url: &str) -> Option<i64> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.domain() != Some("cloud.tencent.com") {
+        return None;
+    }
+    let mut segments = parsed.path_segments()?;
+    let first = segments.next()?;
+    let second = segments.next()?;
+    let third = segments.next()?;
+    if first != "developer" || second != "column" {
+        return None;
+    }
+    third.parse::<i64>().ok()
 }

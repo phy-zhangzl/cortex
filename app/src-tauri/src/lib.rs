@@ -56,6 +56,7 @@ pub fn run() {
             commands::update_article_progress,
             commands::update_article_flags,
             commands::fetch_feed_articles,
+            commands::suggest_source_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

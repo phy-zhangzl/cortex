@@ -1,0 +1,2 @@
+ALTER TABLE feeds ADD COLUMN source_type TEXT NOT NULL DEFAULT 'rss';
+ALTER TABLE feeds ADD COLUMN source_config TEXT;
