@@ -52,6 +52,7 @@ pub fn run() {
             commands::delete_feed,
             commands::list_articles,
             commands::fetch_article_content,
+            commands::analyze_article,
             commands::update_article_progress,
             commands::update_article_flags,
             commands::fetch_feed_articles,

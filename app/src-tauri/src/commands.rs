@@ -2,6 +2,7 @@ use crate::models::{Article, Category, Feed};
 use crate::services::content_service::ContentService;
 use crate::services::feed_service::FeedService;
 use chrono::Utc;
+use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tauri::State;
 use uuid::Uuid;
@@ -288,7 +289,7 @@ pub async fn list_articles(
 
     let articles = if let Some(feed_id) = feed_id {
         sqlx::query_as::<_, Article>(
-            "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE feed_id = ? ORDER BY pub_date DESC LIMIT ?",
+            "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE feed_id = ? ORDER BY pub_date DESC LIMIT ?",
         )
         .bind(feed_id)
         .bind(limit)
@@ -297,7 +298,7 @@ pub async fn list_articles(
         .map_err(|e| e.to_string())?
     } else {
         sqlx::query_as::<_, Article>(
-            "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles ORDER BY pub_date DESC LIMIT ?",
+            "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles ORDER BY pub_date DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(&state.pool)
@@ -314,7 +315,7 @@ pub async fn fetch_article_content(
     article_id: String,
 ) -> Result<Article, String> {
     let article = sqlx::query_as::<_, Article>(
-        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
+        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
     )
     .bind(&article_id)
     .fetch_one(&state.pool)
@@ -362,7 +363,136 @@ pub async fn fetch_article_content(
     .map_err(|e| format!("update article content failed (len={}): {e}", content.len()))?;
 
     let updated = sqlx::query_as::<_, Article>(
-        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
+        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
+    )
+    .bind(&article_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn analyze_article(
+    state: State<'_, AppState>,
+    article_id: String,
+    force: Option<bool>,
+) -> Result<Article, String> {
+    let article = sqlx::query_as::<_, Article>(
+        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
+    )
+    .bind(&article_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if force.unwrap_or(false) == false && article.ai_summary.is_some() {
+        return Ok(article);
+    }
+
+    let api_key = std::env::var("DEEPSEEK_API_KEY")
+        .map_err(|_| "缺少 DEEPSEEK_API_KEY 环境变量".to_string())?;
+
+    let source = article
+        .summary
+        .clone()
+        .or_else(|| article.content.clone())
+        .unwrap_or_default();
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("文章内容为空，无法分析".to_string());
+    }
+
+    let text: String = trimmed.chars().take(4000).collect();
+    let system_prompt = "你是科研阅读助理。请根据论文标题与摘要输出简洁的中文意译与要点。";
+    let user_prompt = format!(
+        "标题: {}\n摘要: {}\n\n请输出 JSON，字段为:\nsummary_zh: 中文意译（口语化但专业，2-4 句）\nscore: 0-100 的相关性分数\nnotes: 核心贡献或要点（3-5 条，数组或多行文本）",
+        article.title,
+        text
+    );
+
+    let payload = json!({
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 800
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .post("https://api.deepseek.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("AI 请求失败: {} {}", status, body));
+    }
+
+    let response_json: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let content = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| "AI 返回内容为空".to_string())?;
+
+    let trimmed = content.trim();
+    let json_text = if trimmed.starts_with("{") {
+        trimmed.to_string()
+    } else if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        trimmed[start..=end].to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    let parsed: Value = serde_json::from_str(&json_text).map_err(|e| {
+        format!("AI 返回不是 JSON: {e} | raw={}", trimmed)
+    })?;
+    let summary = parsed["summary_zh"].as_str().unwrap_or("").trim().to_string();
+    let score = parsed["score"].as_i64().or_else(|| {
+        parsed["score"].as_str().and_then(|value| value.parse::<i64>().ok())
+    });
+
+    let notes = if let Some(items) = parsed["notes"].as_array() {
+        let list = items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>();
+        if list.is_empty() {
+            String::new()
+        } else {
+            format!("- {}", list.join("\n- "))
+        }
+    } else {
+        parsed["notes"].as_str().unwrap_or("").trim().to_string()
+    };
+
+    let now = Utc::now();
+    sqlx::query(
+        "UPDATE articles SET ai_summary = ?, ai_score = ?, ai_notes = ?, ai_updated_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(&summary)
+    .bind(score)
+    .bind(&notes)
+    .bind(now)
+    .bind(now)
+    .bind(&article_id)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let updated = sqlx::query_as::<_, Article>(
+        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
     )
     .bind(&article_id)
     .fetch_one(&state.pool)
@@ -414,7 +544,7 @@ pub async fn update_article_flags(
     .map_err(|e| e.to_string())?;
 
     let updated = sqlx::query_as::<_, Article>(
-        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
+        "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
     )
     .bind(&article_id)
     .fetch_one(&state.pool)
@@ -458,6 +588,8 @@ pub async fn fetch_feed_articles(
     let max_entries = limit.unwrap_or(30) as usize;
     let mut inserted: i64 = 0;
 
+    let is_arxiv = feed.url.contains("arxiv.org/rss") || feed.url.contains("export.arxiv.org/rss");
+
     for entry in parsed.entries.into_iter().take(max_entries) {
         if entry.url.is_empty() {
             continue;
@@ -465,6 +597,20 @@ pub async fn fetch_feed_articles(
 
         if let (Some(last_fetch_at), Some(pub_date)) = (feed.last_fetch_at, entry.pub_date) {
             if pub_date <= last_fetch_at {
+                continue;
+            }
+        }
+
+        if is_arxiv {
+            let summary_text = entry
+                .summary
+                .as_deref()
+                .or(entry.content.as_deref())
+                .unwrap_or("");
+            let summary_lower = summary_text.to_lowercase();
+            if !summary_lower.contains("large language model")
+                || summary_lower.contains("biology")
+            {
                 continue;
             }
         }

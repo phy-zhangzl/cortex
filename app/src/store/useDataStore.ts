@@ -32,6 +32,10 @@ export interface Article {
   summary?: string | null;
   content?: string | null;
   content_extracted: boolean;
+  ai_summary?: string | null;
+  ai_score?: number | null;
+  ai_notes?: string | null;
+  ai_updated_at?: string | null;
   is_read: boolean;
   is_favorite: boolean;
   read_progress: number;
@@ -64,9 +68,13 @@ interface DataState {
   }) => Promise<Feed | null>;
   updateFeedFavicon: (feedId: string, faviconUrl: string | null) => Promise<Feed | null>;
   updateFeedCategory: (feedId: string, categoryId: string | null) => Promise<Feed | null>;
-  fetchFeedArticles: (feedId: string, refreshLimit?: number) => Promise<number | null>;
+  fetchFeedArticles: (
+    feedId: string,
+    options?: { refreshLimit?: number; fetchLimit?: number }
+  ) => Promise<number | null>;
   deleteFeed: (feedId: string) => Promise<boolean>;
   fetchArticleContent: (articleId: string) => Promise<Article | null>;
+  analyzeArticle: (articleId: string, force?: boolean) => Promise<Article | null>;
   updateArticleProgress: (articleId: string, progress: number, isRead: boolean) => Promise<void>;
   updateArticleFlags: (articleId: string, isRead: boolean, isFavorite: boolean) => Promise<void>;
 }
@@ -196,13 +204,13 @@ export const useDataStore = create<DataState>((set, get) => ({
       return null;
     }
   },
-  fetchFeedArticles: async (feedId, refreshLimit) => {
+  fetchFeedArticles: async (feedId, options) => {
     try {
       const inserted = await invoke<number>("fetch_feed_articles", {
         feedId,
-        limit: 30,
+        limit: options?.fetchLimit ?? 30,
       });
-      await get().loadAll(refreshLimit);
+      await get().loadAll(options?.refreshLimit);
       return inserted;
     } catch (error) {
       set({ error: String(error) });
@@ -224,6 +232,23 @@ export const useDataStore = create<DataState>((set, get) => ({
     try {
       const article = await invoke<Article>("fetch_article_content", {
         articleId,
+      });
+      set({
+        articles: get().articles.map((item) =>
+          item.id === articleId ? article : item
+        ),
+      });
+      return article;
+    } catch (error) {
+      set({ error: String(error) });
+      return null;
+    }
+  },
+  analyzeArticle: async (articleId, force) => {
+    try {
+      const article = await invoke<Article>("analyze_article", {
+        articleId,
+        force: force ?? false,
       });
       set({
         articles: get().articles.map((item) =>

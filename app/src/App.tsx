@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { useDataStore } from "@/store/useDataStore";
 import hljs from "highlight.js";
-import "highlight.js/styles/github-dark.css";
+import "highlight.js/styles/github.css";
 import parse from "html-react-parser";
 
 // Types for our data structures
@@ -50,7 +50,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "unread">("newest");
+  const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "unread" | "score">("newest");
   const [articleLimit, setArticleLimit] = useState(50);
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
@@ -59,9 +59,13 @@ function App() {
   const [contentHtml, setContentHtml] = useState<string>("");
   const [contentError, setContentError] = useState<string | null>(null);
   const [readProgress, setReadProgress] = useState(0);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [tocItems, setTocItems] = useState<Array<{ id: string; text: string; level: number }>>(
     []
   );
+  const [activeTocId, setActiveTocId] = useState<string | null>(null);
+  const [isTocOpen, setIsTocOpen] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const lastSavedProgressRef = useRef(0);
@@ -82,6 +86,7 @@ function App() {
     fetchFeedArticles,
     deleteFeed,
     fetchArticleContent,
+    analyzeArticle,
     updateArticleProgress,
     updateArticleFlags,
   } = useDataStore();
@@ -182,6 +187,14 @@ function App() {
     return feeds.find((feed) => feed.id === selectedFeed) ?? null;
   }, [feeds, selectedFeed]);
 
+  const arxivFeed = useMemo(() => {
+    return (
+      feeds.find((feed) =>
+        feed.url.toLowerCase().includes("export.arxiv.org/rss/cs.ai")
+      ) || null
+    );
+  }, [feeds]);
+
   const selectedFeedTitle = useMemo(() => {
     if (!selectedArticle) {
       return null;
@@ -244,6 +257,15 @@ function App() {
       sorted.sort((a, b) => articleTimestamp(a) - articleTimestamp(b));
     } else if (sortMode === "title") {
       sorted.sort((a, b) => a.title.localeCompare(b.title));
+    } else if (sortMode === "score") {
+      sorted.sort((a, b) => {
+        const scoreA = a.ai_score ?? -1;
+        const scoreB = b.ai_score ?? -1;
+        if (scoreA === scoreB) {
+          return articleTimestamp(b) - articleTimestamp(a);
+        }
+        return scoreB - scoreA;
+      });
     } else if (sortMode === "unread") {
       sorted.sort((a, b) => {
         if (a.is_read === b.is_read) {
@@ -326,6 +348,41 @@ function App() {
       setSeedStatus("写入完成");
     } catch (error) {
       console.error("Seed data failed", error);
+      setSeedStatus(`失败: ${String(error)}`);
+    } finally {
+      setSeedLoading(false);
+    }
+  };
+
+  const handleAddArxivFeed = async () => {
+    try {
+      setSeedLoading(true);
+      setSeedStatus("正在添加 arXiv cs.AI...");
+
+      const existingCategory = categories[0];
+      const category = existingCategory || (await createCategory("未分类", null));
+      if (!category) {
+        setSeedStatus(useDataStore.getState().error || "写入分类失败");
+        return;
+      }
+
+      const feed = await createFeed({
+        title: "arXiv cs.AI",
+        url: "https://export.arxiv.org/rss/cs.AI",
+        siteUrl: "https://arxiv.org/list/cs.AI/recent",
+        description: "arXiv cs.AI 分类",
+        categoryId: category.id,
+      });
+
+      if (!feed) {
+        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
+        return;
+      }
+
+      await reloadAll();
+      setSeedStatus("arXiv cs.AI 已添加");
+    } catch (error) {
+      console.error("Add arXiv feed failed", error);
       setSeedStatus(`失败: ${String(error)}`);
     } finally {
       setSeedLoading(false);
@@ -455,7 +512,9 @@ function App() {
     try {
       setSyncLoading(true);
       setSyncStatus("正在抓取 RSS...");
-      const inserted = await fetchFeedArticles(selectedFeed, articleLimit);
+      const inserted = await fetchFeedArticles(selectedFeed, {
+        refreshLimit: articleLimit,
+      });
       if (inserted === null) {
         setSyncStatus(useDataStore.getState().error || "抓取失败");
         return;
@@ -509,7 +568,9 @@ function App() {
 
     try {
       for (const feed of feeds) {
-        const inserted = await fetchFeedArticles(feed.id, articleLimit);
+        const inserted = await fetchFeedArticles(feed.id, {
+          refreshLimit: articleLimit,
+        });
         if (typeof inserted === "number") {
           totalInserted += inserted;
         }
@@ -525,6 +586,72 @@ function App() {
       autoSyncRunningRef.current = false;
     }
   }, [articleLimit, autoSyncEnabled, feeds, fetchFeedArticles]);
+
+  const runArxivGatekeeper = useCallback(async () => {
+    if (!arxivFeed) {
+      return;
+    }
+
+    const today = new Date().toLocaleDateString("en-CA");
+    const lastRun = (() => {
+      try {
+        return localStorage.getItem("cortex:arxiv-gatekeeper-date");
+      } catch {
+        return null;
+      }
+    })();
+
+    if (lastRun === today) {
+      return;
+    }
+
+    setSyncStatus("守门员正在筛选 arXiv cs.AI...");
+    const inserted = await fetchFeedArticles(arxivFeed.id, {
+      fetchLimit: 200,
+      refreshLimit: articleLimit,
+    });
+    if (inserted === null) {
+      setSyncStatus(useDataStore.getState().error || "守门员抓取失败");
+      return;
+    }
+
+    try {
+      localStorage.setItem("cortex:arxiv-gatekeeper-date", today);
+    } catch {
+      // ignore
+    }
+    setSyncStatus(`守门员完成，新增 ${inserted} 篇文章`);
+  }, [arxivFeed, articleLimit, fetchFeedArticles]);
+
+  useEffect(() => {
+    if (!arxivFeed) {
+      return;
+    }
+
+    const scheduleNext = () => {
+      const now = new Date();
+      const next = new Date();
+      next.setHours(8, 0, 0, 0);
+      if (now >= next) {
+        next.setDate(next.getDate() + 1);
+      }
+      const delay = next.getTime() - now.getTime();
+      return window.setTimeout(async () => {
+        await runArxivGatekeeper();
+        scheduleNext();
+      }, delay);
+    };
+
+    const now = new Date();
+    if (now.getHours() >= 8) {
+      runArxivGatekeeper();
+    }
+
+    const timer = scheduleNext();
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [arxivFeed, runArxivGatekeeper]);
 
   useEffect(() => {
     if (!autoSyncEnabled) {
@@ -606,21 +733,41 @@ function App() {
     }
   }, []);
 
+  const buildHeadingSelector = useCallback((id: string) => {
+    return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? `#${CSS.escape(id)}`
+      : `#${id.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+  }, []);
+
+  const tocItemClassName = useCallback(
+    (item: { id: string; level: number }) => {
+      const isActive = item.id === activeTocId;
+      return [
+        "w-full text-left text-sm transition-colors",
+        item.level === 3 ? "pl-4" : "",
+        isActive
+          ? "font-medium text-foreground"
+          : "text-muted-foreground hover:text-foreground",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    },
+    [activeTocId]
+  );
+
   const handleTocJump = useCallback((id: string) => {
     const container = contentRef.current;
     if (!container) {
       return;
     }
-    const selector =
-      typeof CSS !== "undefined" && typeof CSS.escape === "function"
-        ? `#${CSS.escape(id)}`
-        : `#${id.replace(/[^a-zA-Z0-9_-]/g, "")}`;
+    const selector = buildHeadingSelector(id);
     const target = container.querySelector(selector) as HTMLElement | null;
     if (!target) {
       return;
     }
+    setActiveTocId(id);
     target.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
+  }, [buildHeadingSelector]);
 
   const buildContentHtml = useCallback((html: string) => {
     const parser = new DOMParser();
@@ -662,6 +809,8 @@ function App() {
       setContentHtml("");
       setContentError(null);
       setReadProgress(0);
+      setAiError(null);
+      setIsTocOpen(false);
       return;
     }
 
@@ -669,6 +818,7 @@ function App() {
     const loadContent = async () => {
       setContentLoading(true);
       setContentError(null);
+      setAiError(null);
       if (selectedArticle.content) {
         const html = buildContentHtml(selectedArticle.content);
         if (!cancelled) {
@@ -701,6 +851,23 @@ function App() {
     };
   }, [buildContentHtml, fetchArticleContent, selectedArticle]);
 
+
+  const handleAnalyzeArticle = useCallback(
+    async (force?: boolean) => {
+      if (!selectedArticle) {
+        return;
+      }
+      setAiLoading(true);
+      setAiError(null);
+      const result = await analyzeArticle(selectedArticle.id, force);
+      if (!result) {
+        setAiError(useDataStore.getState().error || "AI 分析失败");
+      }
+      setAiLoading(false);
+    },
+    [analyzeArticle, selectedArticle]
+  );
+
   useEffect(() => {
     if (!contentHtml || !contentRef.current) {
       return;
@@ -715,6 +882,7 @@ function App() {
   useEffect(() => {
     if (!contentHtml) {
       setTocItems([]);
+      setActiveTocId(null);
       return;
     }
     const doc = new DOMParser().parseFromString(contentHtml, "text/html");
@@ -727,7 +895,54 @@ function App() {
       }))
       .filter((item) => item.id && item.text);
     setTocItems(items);
+    setActiveTocId(items[0]?.id ?? null);
   }, [contentHtml]);
+
+  useEffect(() => {
+    if (!contentRef.current || tocItems.length === 0) {
+      return;
+    }
+
+    const container = contentRef.current;
+    const headings = tocItems
+      .map((item) => {
+        const element = container.querySelector(buildHeadingSelector(item.id));
+        if (!element) {
+          return null;
+        }
+        return {
+          id: item.id,
+          element: element as HTMLElement,
+        };
+      })
+      .filter((item): item is { id: string; element: HTMLElement } => item !== null);
+
+    if (headings.length === 0) {
+      return;
+    }
+
+    const syncActiveHeading = () => {
+      const containerTop = container.getBoundingClientRect().top;
+      let currentId = headings[0].id;
+      for (const heading of headings) {
+        if (heading.element.getBoundingClientRect().top - containerTop <= 72) {
+          currentId = heading.id;
+        } else {
+          break;
+        }
+      }
+      setActiveTocId((prev) => (prev === currentId ? prev : currentId));
+    };
+
+    syncActiveHeading();
+    container.addEventListener("scroll", syncActiveHeading, { passive: true });
+    window.addEventListener("resize", syncActiveHeading);
+
+    return () => {
+      container.removeEventListener("scroll", syncActiveHeading);
+      window.removeEventListener("resize", syncActiveHeading);
+    };
+  }, [buildHeadingSelector, tocItems]);
 
   useEffect(() => {
     if (!selectedArticle || !contentRef.current) {
@@ -939,6 +1154,14 @@ function App() {
                   {seedStatus}
                 </div>
               )}
+              <button
+                type="button"
+                className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
+                onClick={handleAddArxivFeed}
+                data-tauri-drag-region={false}
+              >
+                添加 arXiv cs.AI 订阅
+              </button>
               <button
                 type="button"
                 className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
@@ -1348,18 +1571,19 @@ function App() {
                       ? " · 收藏"
                       : ""}
                 </span>
-                <select
-                  className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                  value={sortMode}
-                  onChange={(event) => setSortMode(event.target.value as typeof sortMode)}
-                  data-tauri-drag-region={false}
-                >
-                  <option value="newest">最新优先</option>
-                  <option value="oldest">最早优先</option>
-                  <option value="unread">未读优先</option>
-                  <option value="title">标题排序</option>
-                </select>
-              </div>
+              <select
+                className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                value={sortMode}
+                onChange={(event) => setSortMode(event.target.value as typeof sortMode)}
+                data-tauri-drag-region={false}
+              >
+                <option value="newest">最新优先</option>
+                <option value="oldest">最早优先</option>
+                <option value="unread">未读优先</option>
+                <option value="score">AI 评分</option>
+                <option value="title">标题排序</option>
+              </select>
+            </div>
               {selectedFeedInfo && (
                 <div className="flex items-center justify-between gap-2 text-[11px]">
                   <span>上次同步 {formatDateTime(selectedFeedInfo.last_fetch_at)}</span>
@@ -1395,7 +1619,14 @@ function App() {
                     <h3 className={`text-sm ${article.is_read ? "font-normal" : "font-semibold"} line-clamp-2`}>
                       {article.title}
                     </h3>
-                      {article.is_favorite && <span>⭐</span>}
+                      <div className="flex items-center gap-2">
+                        {typeof article.ai_score === "number" && (
+                          <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
+                            {article.ai_score}
+                          </span>
+                        )}
+                        {article.is_favorite && <span>⭐</span>}
+                      </div>
                     </div>
                   <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                     {article.summary || ""}
@@ -1496,6 +1727,16 @@ function App() {
                   >
                     {isFocusMode ? "退出专注" : "专注模式"}
                   </Button>
+                  {isFocusMode && tocItems.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-tauri-drag-region={false}
+                      onClick={() => setIsTocOpen((value) => !value)}
+                    >
+                      {isTocOpen ? "隐藏目录" : "显示目录"}
+                    </Button>
+                  )}
                   <span>{readProgress.toFixed(0)}%</span>
                   {contentError && (
                     <span className="text-destructive">{contentError}</span>
@@ -1532,45 +1773,105 @@ function App() {
               data-tauri-drag-region={false}
               ref={contentRef}
             >
-              <h1 className="text-3xl font-bold mb-4">{selectedArticle.title}</h1>
-              <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground mb-8">
-                <span>{selectedArticle.author || "Unknown"}</span>
-                <span>•</span>
-                <span>
-                  {selectedArticle.pub_date
-                    ? new Date(selectedArticle.pub_date).toLocaleString()
-                    : ""}
-                </span>
-                <span>•</span>
-                <span>{selectedArticle.content_extracted ? "全文" : "摘要"}</span>
-                {selectedFeedTitle && (
-                  <>
+              <div className={isFocusMode ? "" : "relative flex gap-6"}>
+                <div className="min-w-0 flex-1">
+                  <h1 className="text-3xl font-bold mb-4">{selectedArticle.title}</h1>
+                  <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground mb-8">
+                    <span>{selectedArticle.author || "Unknown"}</span>
                     <span>•</span>
-                    <span>{selectedFeedTitle}</span>
-                  </>
-                )}
-                {readMinutes !== null && (
-                  <>
+                    <span>
+                      {selectedArticle.pub_date
+                        ? new Date(selectedArticle.pub_date).toLocaleString()
+                        : ""}
+                    </span>
                     <span>•</span>
-                    <span>约 {readMinutes} 分钟</span>
-                  </>
-                )}
-              </div>
-              {contentLoading ? (
-                <div className="text-sm text-muted-foreground">正在加载全文...</div>
-              ) : (
-                <div className="space-y-4">
-                  {tocItems.length > 0 && (
-                    <div className="rounded-lg border border-border bg-card/30 p-3">
+                    <span>{selectedArticle.content_extracted ? "全文" : "摘要"}</span>
+                    {selectedFeedTitle && (
+                      <>
+                        <span>•</span>
+                        <span>{selectedFeedTitle}</span>
+                      </>
+                    )}
+                    {readMinutes !== null && (
+                      <>
+                        <span>•</span>
+                        <span>约 {readMinutes} 分钟</span>
+                      </>
+                    )}
+                  </div>
+                  {contentLoading ? (
+                    <div className="text-sm text-muted-foreground">正在加载全文...</div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-border bg-card/40 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-semibold text-muted-foreground">AI 解读</div>
+                          <div className="flex items-center gap-2">
+                            {typeof selectedArticle.ai_score === "number" && (
+                              <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
+                                评分 {selectedArticle.ai_score}
+                              </span>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              data-tauri-drag-region={false}
+                              onClick={() => handleAnalyzeArticle(!!selectedArticle.ai_summary)}
+                              disabled={aiLoading}
+                            >
+                              {selectedArticle.ai_summary ? "重新生成" : "生成 AI 解读"}
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="mt-2 space-y-2 text-sm text-foreground">
+                          {aiLoading && (
+                            <div className="text-xs text-muted-foreground">正在生成 AI 解读...</div>
+                          )}
+                          {aiError && (
+                            <div className="text-xs text-destructive">{aiError}</div>
+                          )}
+                          {selectedArticle.ai_summary && (
+                            <p className="leading-relaxed text-sm">{selectedArticle.ai_summary}</p>
+                          )}
+                          {selectedArticle.ai_notes && (
+                            <div className="text-xs text-muted-foreground whitespace-pre-line">
+                              {selectedArticle.ai_notes}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {contentError && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          data-tauri-drag-region={false}
+                          onClick={() => fetchArticleContent(selectedArticle.id)}
+                        >
+                          重试全文抓取
+                        </Button>
+                      )}
+                      <div
+                        className="reader-content prose prose-lg max-w-none dark:prose-invert prose-pre:bg-muted prose-pre:text-foreground prose-pre:rounded-lg prose-pre:px-4 prose-pre:py-3 prose-img:rounded-lg"
+                        style={{
+                          fontSize: `${readerFontSize}px`,
+                          ["--reader-font-size" as string]: `${readerFontSize}px`,
+                        }}
+                      >
+                        {parse(contentHtml || selectedArticle.summary || "")}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {!isFocusMode && tocItems.length > 0 && (
+                  <aside className="hidden xl:block w-48 shrink-0">
+                    <div className="sticky top-24 rounded-lg border border-border bg-card/30 p-3">
                       <div className="text-xs font-semibold text-muted-foreground mb-2">目录</div>
                       <div className="space-y-1">
                         {tocItems.map((item) => (
                           <button
                             key={item.id}
                             type="button"
-                            className={`w-full text-left text-sm text-muted-foreground hover:text-foreground ${
-                              item.level === 3 ? "pl-4" : ""
-                            }`}
+                            className={tocItemClassName(item)}
                             onClick={() => handleTocJump(item.id)}
                             data-tauri-drag-region={false}
                           >
@@ -1579,27 +1880,38 @@ function App() {
                         ))}
                       </div>
                     </div>
-                  )}
-                  {contentError && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      data-tauri-drag-region={false}
-                      onClick={() => fetchArticleContent(selectedArticle.id)}
-                    >
-                      重试全文抓取
-                    </Button>
-                  )}
-                  <div
-                    className="reader-content prose prose-lg max-w-none dark:prose-invert prose-pre:bg-neutral-900 prose-pre:text-neutral-100 prose-pre:rounded-lg prose-pre:px-4 prose-pre:py-3 prose-img:rounded-lg"
-                    style={{
-                      fontSize: `${readerFontSize}px`,
-                      ["--reader-font-size" as string]: `${readerFontSize}px`,
-                    }}
-                  >
-                    {parse(contentHtml || selectedArticle.summary || "")}
+                  </aside>
+                )}
+              </div>
+              {isFocusMode && tocItems.length > 0 && isTocOpen && (
+                <aside className="hidden xl:block fixed right-6 top-24 w-56 z-20">
+                  <div className="rounded-lg border border-border bg-card/90 p-3 shadow-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-xs font-semibold text-muted-foreground">目录</div>
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => setIsTocOpen(false)}
+                        data-tauri-drag-region={false}
+                      >
+                        隐藏
+                      </button>
+                    </div>
+                    <div className="mt-2 space-y-1 max-h-[60vh] overflow-y-auto">
+                      {tocItems.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={tocItemClassName(item)}
+                          onClick={() => handleTocJump(item.id)}
+                          data-tauri-drag-region={false}
+                        >
+                          {item.text}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                </aside>
               )}
             </article>
           </>

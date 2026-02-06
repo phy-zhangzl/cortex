@@ -12,6 +12,11 @@ impl FeedService {
         Self {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .gzip(true)
+                .brotli(true)
+                .deflate(true)
                 .build()
                 .expect("Failed to create HTTP client"),
         }
@@ -21,12 +26,14 @@ impl FeedService {
         let response = self
             .client
             .get(feed_url)
-            .header("User-Agent", "Cortex/1.0 RSS Reader")
+            .header("User-Agent", "Cortex/1.0 RSS Reader (Mozilla/5.0)")
+            .header("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml, */*")
             .send()
             .await
-            .map_err(FeedError::RequestError)?;
+            .map_err(|e| FeedError::RequestError(format!("Failed to fetch {}: {}", feed_url, e)))?;
 
-        let bytes = response.bytes().await.map_err(FeedError::RequestError)?;
+        let bytes = response.bytes().await
+            .map_err(|e| FeedError::RequestError(format!("Failed to read response: {}", e)))?;
         let feed = parser::parse(Cursor::new(bytes)).map_err(FeedError::ParseError)?;
 
         Ok(ParsedFeed {
@@ -76,14 +83,14 @@ pub struct ParsedEntry {
 
 #[derive(Debug)]
 pub enum FeedError {
-    RequestError(reqwest::Error),
+    RequestError(String),
     ParseError(feed_rs::parser::ParseFeedError),
 }
 
 impl std::fmt::Display for FeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FeedError::RequestError(e) => write!(f, "Request error: {}", e),
+            FeedError::RequestError(e) => write!(f, "{}", e),
             FeedError::ParseError(e) => write!(f, "Parse error: {}", e),
         }
     }
@@ -92,7 +99,7 @@ impl std::fmt::Display for FeedError {
 impl std::error::Error for FeedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            FeedError::RequestError(e) => Some(e),
+            FeedError::RequestError(_) => None,
             FeedError::ParseError(e) => Some(e),
         }
     }
