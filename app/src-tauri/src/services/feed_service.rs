@@ -14,9 +14,6 @@ impl FeedService {
                 .timeout(std::time::Duration::from_secs(30))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .redirect(reqwest::redirect::Policy::limited(10))
-                .gzip(true)
-                .brotli(true)
-                .deflate(true)
                 .build()
                 .expect("Failed to create HTTP client"),
         }
