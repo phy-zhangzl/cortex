@@ -83,6 +83,8 @@ interface DataState {
   analyzeArticle: (articleId: string, force?: boolean) => Promise<Article | null>;
   updateArticleProgress: (articleId: string, progress: number, isRead: boolean) => Promise<void>;
   updateArticleFlags: (articleId: string, isRead: boolean, isFavorite: boolean) => Promise<void>;
+  getSetting: (key: string) => Promise<string | null>;
+  setSetting: (key: string, value: string) => Promise<boolean>;
 }
 
 export const useDataStore = create<DataState>((set, get) => ({
@@ -304,6 +306,22 @@ export const useDataStore = create<DataState>((set, get) => ({
       });
     } catch (error) {
       set({ error: String(error) });
+    }
+  },
+  getSetting: async (key) => {
+    try {
+      return await invoke<string | null>("get_setting", { key });
+    } catch {
+      return null;
+    }
+  },
+  setSetting: async (key, value) => {
+    try {
+      await invoke("set_setting", { key, value });
+      return true;
+    } catch (error) {
+      set({ error: String(error) });
+      return false;
     }
   },
 }));

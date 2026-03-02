@@ -17,6 +17,26 @@ pub struct AppState {
 }
 
 #[tauri::command]
+pub async fn get_setting(state: State<'_, AppState>, key: String) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+        .bind(&key)
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(&key)
+        .bind(&value)
+        .execute(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn suggest_source_config(url: String) -> Result<Value, String> {
     if let Some(guest_suid) = extract_qq_guest_suid(&url) {
         return Ok(json!({
@@ -457,8 +477,13 @@ pub async fn analyze_article(
         return Ok(article);
     }
 
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .map_err(|_| "缺少 DEEPSEEK_API_KEY 环境变量".to_string())?;
+    let api_key = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'deepseek_api_key'")
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| "请先在设置中配置 DeepSeek API Key".to_string())?;
 
     let source = article
         .summary

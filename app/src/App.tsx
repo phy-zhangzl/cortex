@@ -70,6 +70,9 @@ function App() {
   );
   const [activeTocId, setActiveTocId] = useState<string | null>(null);
   const [isTocOpen, setIsTocOpen] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null);
+  const [apiKeySaving, setApiKeySaving] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const lastSavedProgressRef = useRef(0);
@@ -93,6 +96,8 @@ function App() {
     analyzeArticle,
     updateArticleProgress,
     updateArticleFlags,
+    getSetting,
+    setSetting,
   } = useDataStore();
 
   const appWindow = getCurrentWindow();
@@ -160,6 +165,24 @@ function App() {
   useEffect(() => {
     reloadAll();
   }, [reloadAll]);
+
+  useEffect(() => {
+    getSetting("deepseek_api_key").then((val) => {
+      setApiKeyConfigured(!!val && val.trim().length > 0);
+    });
+  }, [getSetting]);
+
+  const handleSaveApiKey = async () => {
+    const trimmed = apiKeyInput.trim();
+    if (!trimmed) return;
+    setApiKeySaving(true);
+    const ok = await setSetting("deepseek_api_key", trimmed);
+    setApiKeySaving(false);
+    if (ok) {
+      setApiKeyConfigured(true);
+      setApiKeyInput("");
+    }
+  };
 
   useEffect(() => {
     if (!selectedFeed) {
@@ -2043,18 +2066,31 @@ function App() {
                             <div className="text-xs text-muted-foreground">正在生成 AI 解读...</div>
                           )}
                           {aiError && (
-                            <div className="text-xs text-destructive">
-                              {aiError}
-                              {aiError.includes("DEEPSEEK_API_KEY") && (
-                                <span className="block mt-1 text-muted-foreground">
-                                  需要设置环境变量 DEEPSEEK_API_KEY 后重启应用
-                                </span>
-                              )}
-                            </div>
+                            <div className="text-xs text-destructive">{aiError}</div>
                           )}
-                          {!selectedArticle.ai_summary && !aiLoading && !aiError && (
-                            <div className="text-xs text-muted-foreground">
-                              可选功能，需配置 DEEPSEEK_API_KEY 环境变量
+                          {apiKeyConfigured === false && !selectedArticle.ai_summary && (
+                            <div className="space-y-2">
+                              <div className="text-xs text-muted-foreground">
+                                需要配置 DeepSeek API Key 以使用 AI 解读
+                              </div>
+                              <div className="flex gap-2">
+                                <input
+                                  type="password"
+                                  placeholder="sk-..."
+                                  value={apiKeyInput}
+                                  onChange={(e) => setApiKeyInput(e.target.value)}
+                                  className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                                  data-tauri-drag-region={false}
+                                />
+                                <Button
+                                  size="sm"
+                                  data-tauri-drag-region={false}
+                                  onClick={handleSaveApiKey}
+                                  disabled={apiKeySaving || !apiKeyInput.trim()}
+                                >
+                                  保存
+                                </Button>
+                              </div>
                             </div>
                           )}
                           {selectedArticle.ai_summary && (

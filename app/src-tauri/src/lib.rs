@@ -17,6 +17,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
+            commands::get_setting,
+            commands::set_setting,
             commands::list_categories,
             commands::create_category,
             commands::update_category_name,
