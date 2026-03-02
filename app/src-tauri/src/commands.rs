@@ -721,23 +721,10 @@ async fn insert_entries(
     max_entries: usize,
 ) -> Result<i64, String> {
     let mut inserted: i64 = 0;
-    let is_arxiv = feed.url.contains("arxiv.org/rss") || feed.url.contains("export.arxiv.org/rss");
 
     for entry in entries.into_iter().take(max_entries) {
         if entry.url.is_empty() {
             continue;
-        }
-
-        if is_arxiv {
-            let summary_text = entry
-                .summary
-                .as_deref()
-                .or(entry.content.as_deref())
-                .unwrap_or("");
-            let summary_lower = summary_text.to_lowercase();
-            if !summary_lower.contains("large language model") || summary_lower.contains("biology") {
-                continue;
-            }
         }
 
         let existing: Option<String> = sqlx::query_scalar(

@@ -34,9 +34,6 @@ impl FeedService {
         let feed = parser::parse(Cursor::new(bytes)).map_err(FeedError::ParseError)?;
 
         Ok(ParsedFeed {
-            title: feed.title.map(|t| t.content).unwrap_or_default(),
-            description: feed.description.map(|d| d.content).unwrap_or_default(),
-            site_url: feed.links.first().map(|l| l.href.clone()).unwrap_or_default(),
             entries: feed.entries.into_iter().map(|e| self.parse_entry(e)).collect(),
         })
     }
@@ -68,9 +65,6 @@ impl FeedService {
 
 #[derive(Debug)]
 pub struct ParsedFeed {
-    pub title: String,
-    pub description: String,
-    pub site_url: String,
     pub entries: Vec<ParsedEntry>,
 }
 

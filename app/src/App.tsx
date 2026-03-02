@@ -191,14 +191,6 @@ function App() {
     return feeds.find((feed) => feed.id === selectedFeed) ?? null;
   }, [feeds, selectedFeed]);
 
-  const arxivFeed = useMemo(() => {
-    return (
-      feeds.find((feed) =>
-        feed.url.toLowerCase().includes("export.arxiv.org/rss/cs.ai")
-      ) || null
-    );
-  }, [feeds]);
-
   const selectedFeedTitle = useMemo(() => {
     if (!selectedArticle) {
       return null;
@@ -324,77 +316,6 @@ function App() {
     }
     return date.toLocaleString();
   }, []);
-
-  const handleAddSampleData = async () => {
-    try {
-      setSeedLoading(true);
-      setSeedStatus("正在写入数据库...");
-      const existingCategory = categories[0];
-      const category =
-        existingCategory || (await createCategory("技术", null));
-
-      if (!category) {
-        setSeedStatus(useDataStore.getState().error || "写入分类失败");
-        setSeedLoading(false);
-        return;
-      }
-
-      const feed = await createFeed({
-        title: "OpenAI Blog",
-        url: "https://openai.com/blog/rss.xml",
-        siteUrl: "https://openai.com/blog",
-        description: "OpenAI 官方博客",
-        categoryId: category.id,
-      });
-
-      if (!feed) {
-        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
-        return;
-      }
-
-      await reloadAll();
-      setSeedStatus("写入完成");
-    } catch (error) {
-      console.error("Seed data failed", error);
-      setSeedStatus(`失败: ${String(error)}`);
-    } finally {
-      setSeedLoading(false);
-    }
-  };
-
-  const handleAddQqAuthorSample = async () => {
-    try {
-      setSeedLoading(true);
-      setSeedStatus("正在添加腾讯作者源...");
-
-      const existingCategory = categories[0];
-      const category = existingCategory || (await createCategory("未分类", null));
-      if (!category) {
-        setSeedStatus(useDataStore.getState().error || "写入分类失败");
-        return;
-      }
-
-      const feed = await createFeed({
-        title: "阿里技术（腾讯作者）",
-        url: "https://news.qq.com/omn/author/8QMf13xV64IUuQ%3D%3D",
-        description: "腾讯新闻作者页（Web API）",
-        categoryId: category.id,
-      });
-
-      if (!feed) {
-        setSeedStatus(useDataStore.getState().error || "写入订阅源失败");
-        return;
-      }
-
-      await reloadAll();
-      setSeedStatus("腾讯作者源已添加，可直接抓取测试");
-    } catch (error) {
-      console.error("Add QQ source failed", error);
-      setSeedStatus(`失败: ${String(error)}`);
-    } finally {
-      setSeedLoading(false);
-    }
-  };
 
   const resetFeedForm = () => {
     setFeedTitle("");
@@ -648,72 +569,6 @@ function App() {
       autoSyncRunningRef.current = false;
     }
   }, [articleLimit, autoSyncEnabled, feeds, fetchFeedArticles]);
-
-  const runArxivGatekeeper = useCallback(async () => {
-    if (!arxivFeed) {
-      return;
-    }
-
-    const today = new Date().toLocaleDateString("en-CA");
-    const lastRun = (() => {
-      try {
-        return localStorage.getItem("cortex:arxiv-gatekeeper-date");
-      } catch {
-        return null;
-      }
-    })();
-
-    if (lastRun === today) {
-      return;
-    }
-
-    setSyncStatus("守门员正在筛选 arXiv cs.AI...");
-    const inserted = await fetchFeedArticles(arxivFeed.id, {
-      fetchLimit: 200,
-      refreshLimit: articleLimit,
-    });
-    if (inserted === null) {
-      setSyncStatus(useDataStore.getState().error || "守门员抓取失败");
-      return;
-    }
-
-    try {
-      localStorage.setItem("cortex:arxiv-gatekeeper-date", today);
-    } catch {
-      // ignore
-    }
-    setSyncStatus(`守门员完成，新增 ${inserted} 篇文章`);
-  }, [arxivFeed, articleLimit, fetchFeedArticles]);
-
-  useEffect(() => {
-    if (!arxivFeed) {
-      return;
-    }
-
-    const scheduleNext = () => {
-      const now = new Date();
-      const next = new Date();
-      next.setHours(8, 0, 0, 0);
-      if (now >= next) {
-        next.setDate(next.getDate() + 1);
-      }
-      const delay = next.getTime() - now.getTime();
-      return window.setTimeout(async () => {
-        await runArxivGatekeeper();
-        scheduleNext();
-      }, delay);
-    };
-
-    const now = new Date();
-    if (now.getHours() >= 8) {
-      runArxivGatekeeper();
-    }
-
-    const timer = scheduleNext();
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [arxivFeed, runArxivGatekeeper]);
 
   useEffect(() => {
     if (!autoSyncEnabled) {
@@ -1530,22 +1385,6 @@ function App() {
                   {seedStatus}
                 </div>
               )}
-              <button
-                type="button"
-                className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
-                onClick={handleAddQqAuthorSample}
-                data-tauri-drag-region={false}
-              >
-                添加腾讯作者测试源
-              </button>
-              <button
-                type="button"
-                className="mt-2 text-[11px] text-muted-foreground hover:text-foreground"
-                onClick={handleAddSampleData}
-                data-tauri-drag-region={false}
-              >
-                快速添加示例订阅
-              </button>
             </div>
             <div className="px-3 pb-3">
               <div className="text-[11px] font-semibold text-muted-foreground tracking-wider mb-2">
@@ -2204,7 +2043,19 @@ function App() {
                             <div className="text-xs text-muted-foreground">正在生成 AI 解读...</div>
                           )}
                           {aiError && (
-                            <div className="text-xs text-destructive">{aiError}</div>
+                            <div className="text-xs text-destructive">
+                              {aiError}
+                              {aiError.includes("DEEPSEEK_API_KEY") && (
+                                <span className="block mt-1 text-muted-foreground">
+                                  需要设置环境变量 DEEPSEEK_API_KEY 后重启应用
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {!selectedArticle.ai_summary && !aiLoading && !aiError && (
+                            <div className="text-xs text-muted-foreground">
+                              可选功能，需配置 DEEPSEEK_API_KEY 环境变量
+                            </div>
                           )}
                           {selectedArticle.ai_summary && (
                             <p className="leading-relaxed text-sm">{selectedArticle.ai_summary}</p>

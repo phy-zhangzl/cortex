@@ -31,18 +31,5 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    sqlx::query("DROP TRIGGER IF EXISTS articles_fts_insert;")
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    sqlx::query("DROP TRIGGER IF EXISTS articles_fts_delete;")
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    sqlx::query("DROP TRIGGER IF EXISTS articles_fts_update;")
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
     Ok(pool)
 }

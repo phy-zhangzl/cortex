@@ -52,18 +52,3 @@ pub struct Article {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ArticleView {
-    pub id: String,
-    pub feed_id: String,
-    pub feed_title: String,
-    pub title: String,
-    pub url: String,
-    pub author: Option<String>,
-    pub pub_date: String,
-    pub summary: String,
-    pub content: Option<String>,
-    pub is_read: bool,
-    pub is_favorite: bool,
-}
