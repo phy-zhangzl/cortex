@@ -57,6 +57,12 @@ See:
 - `RELEASE.md`
 - `CHANGELOG.md`
 
+Automation included:
+
+- CI validation on pushes and pull requests
+- Automatic macOS release build on Git tags like `v0.1.2`
+- Dependabot updates for npm, Cargo, and GitHub Actions
+
 ## Branch strategy
 
 - `main` — release-ready branch

@@ -38,12 +38,15 @@ git push origin main
 git push origin --tags
 ```
 
-## 6. Publish GitHub release
+## 6. Let GitHub Actions build the release
 
-Create a GitHub Release from the matching tag and attach packaged artifacts, such as:
+Pushing a tag like `vX.Y.Z` triggers `.github/workflows/release.yml`, which will:
 
-- `.dmg`
-- `.app` bundle archive if needed
+- run validation
+- build the macOS bundle
+- attach the generated DMG to the GitHub release
+
+If needed, you can still create or edit the release notes manually afterward.
 
 ## Release checklist
 

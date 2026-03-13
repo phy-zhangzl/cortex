@@ -55,7 +55,8 @@ npm run check
 - Update version numbers consistently
 - Update `CHANGELOG.md`
 - Create an annotated Git tag
-- Publish the packaged artifact with release notes
+- Push the tag to trigger the automated GitHub release build
+- Verify the generated release artifact and notes
 
 ## Tag format
 
