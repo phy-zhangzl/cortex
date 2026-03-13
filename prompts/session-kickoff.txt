@@ -1,0 +1,5 @@
+Please follow docs/language-workflow.md in this repo.
+Rule: correct my English first, then answer my question.
+Keep corrections simple and practical.
+If my English is weak, use short and clear sentences.
+Add one quick improvement tip in each reply.
