@@ -412,7 +412,7 @@ pub async fn fetch_article_content(
         return Ok(article);
     }
 
-    if !ContentService::should_extract(article.summary.as_deref()) {
+    if !ContentService::should_extract(&article.url, article.summary.as_deref()) {
         return Ok(article);
     }
 

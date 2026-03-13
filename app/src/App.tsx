@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,21 @@ import parse from "html-react-parser";
 
 // Types for our data structures
 type Article = ReturnType<typeof useDataStore.getState>["articles"][number];
+
+type FeedBackupFile = {
+  version: number;
+  exported_at: string;
+  categories: Array<{ name: string }>;
+  feeds: Array<{
+    title: string;
+    url: string;
+    source_type?: string;
+    source_config?: string | null;
+    site_url?: string | null;
+    description?: string | null;
+    category_name?: string | null;
+  }>;
+};
 
 function App() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
@@ -35,6 +50,17 @@ function App() {
       return localStorage.getItem("cortex:all-feeds-collapsed") === "true";
     } catch {
       return false;
+    }
+  });
+  const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+    try {
+      const stored = localStorage.getItem("cortex:collapsed-categories");
+      return stored ? (JSON.parse(stored) as Record<string, boolean>) : {};
+    } catch {
+      return {};
     }
   });
   const [readerFontSize, setReaderFontSize] = useState(() => {
@@ -75,6 +101,7 @@ function App() {
   const [apiKeySaving, setApiKeySaving] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const lastSavedProgressRef = useRef(0);
 
   const {
@@ -149,6 +176,27 @@ function App() {
 
   useEffect(() => {
     try {
+      localStorage.setItem(
+        "cortex:collapsed-categories",
+        JSON.stringify(collapsedCategories)
+      );
+    } catch {
+      // ignore
+    }
+  }, [collapsedCategories]);
+
+  useEffect(() => {
+    setCollapsedCategories((current) => {
+      const validIds = new Set(categories.map((category) => category.id));
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([categoryId]) => validIds.has(categoryId))
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+  }, [categories]);
+
+  useEffect(() => {
+    try {
       localStorage.setItem("cortex:reader-font-size", String(readerFontSize));
     } catch {
       // ignore
@@ -206,6 +254,17 @@ function App() {
   const totalUnread = useMemo(() => {
     return articles.filter((article) => !article.is_read).length;
   }, [articles]);
+
+  const feedsByCategory = useMemo(() => {
+    const result = new Map<string, typeof feeds>();
+    categories.forEach((category) => {
+      result.set(
+        category.id,
+        feeds.filter((feed) => feed.category_id === category.id)
+      );
+    });
+    return result;
+  }, [categories, feeds]);
 
   const selectedFeedInfo = useMemo(() => {
     if (!selectedFeed) {
@@ -545,6 +604,138 @@ function App() {
       return;
     }
     setNewCategoryName("");
+  };
+
+  const handleExportFeeds = () => {
+    try {
+      const data: FeedBackupFile = {
+        version: 1,
+        exported_at: new Date().toISOString(),
+        categories: categories.map((category) => ({ name: category.name })),
+        feeds: feeds.map((feed) => {
+          const categoryName =
+            categories.find((category) => category.id === feed.category_id)?.name ?? null;
+          return {
+            title: feed.title,
+            url: feed.url,
+            source_type: feed.source_type ?? "rss",
+            source_config: feed.source_config ?? null,
+            site_url: feed.site_url ?? null,
+            description: feed.description ?? null,
+            category_name: categoryName,
+          };
+        }),
+      };
+
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json;charset=utf-8",
+      });
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      anchor.href = downloadUrl;
+      anchor.download = `cortex-feeds-backup-${stamp}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(downloadUrl);
+      setSeedStatus(`导出完成：${feeds.length} 个订阅源`);
+    } catch (error) {
+      setSeedStatus(`导出失败: ${String(error)}`);
+    }
+  };
+
+  const handleImportButtonClick = () => {
+    importInputRef.current?.click();
+  };
+
+  const handleImportFeeds = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    try {
+      setSeedLoading(true);
+      setSeedStatus("正在导入订阅源...");
+
+      const text = await file.text();
+      const parsed = JSON.parse(text) as FeedBackupFile;
+      if (!parsed || !Array.isArray(parsed.feeds)) {
+        setSeedStatus("导入文件格式无效：缺少 feeds");
+        return;
+      }
+
+      const categoryNameToId = new Map<string, string>();
+      categories.forEach((category) => categoryNameToId.set(category.name.trim(), category.id));
+
+      const importCategoryNames = new Set<string>();
+      if (Array.isArray(parsed.categories)) {
+        parsed.categories.forEach((category) => {
+          const name = category?.name?.trim();
+          if (name) importCategoryNames.add(name);
+        });
+      }
+      parsed.feeds.forEach((feed) => {
+        const name = feed?.category_name?.trim();
+        if (name) importCategoryNames.add(name);
+      });
+
+      for (const categoryName of importCategoryNames) {
+        if (categoryNameToId.has(categoryName)) {
+          continue;
+        }
+        const created = await createCategory(categoryName, null);
+        if (created) {
+          categoryNameToId.set(categoryName, created.id);
+        }
+      }
+
+      const existingUrls = new Set(feeds.map((feed) => feed.url.trim()));
+      let createdCount = 0;
+      let skippedCount = 0;
+
+      for (const item of parsed.feeds) {
+        const title = item?.title?.trim();
+        const url = item?.url?.trim();
+        if (!title || !url) {
+          skippedCount += 1;
+          continue;
+        }
+        if (existingUrls.has(url)) {
+          skippedCount += 1;
+          continue;
+        }
+
+        const categoryName = item.category_name?.trim() || "";
+        const categoryId = categoryName ? (categoryNameToId.get(categoryName) ?? null) : null;
+
+        const created = await createFeed({
+          title,
+          url,
+          sourceType: item.source_type === "web_api" ? "web_api" : "rss",
+          sourceConfig: item.source_config ?? null,
+          siteUrl: item.site_url ?? null,
+          description: item.description ?? null,
+          categoryId,
+        });
+
+        if (created) {
+          existingUrls.add(url);
+          createdCount += 1;
+        } else {
+          skippedCount += 1;
+        }
+      }
+
+      await reloadAll();
+      setSeedStatus(`导入完成：新增 ${createdCount}，跳过 ${skippedCount}`);
+    } catch (error) {
+      setSeedStatus(`导入失败: ${String(error)}`);
+    } finally {
+      setSeedLoading(false);
+    }
   };
 
   const handleDeleteCategory = async (categoryId: string) => {
@@ -1431,6 +1622,36 @@ function App() {
                   添加
                 </Button>
               </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-[11px]"
+                  data-tauri-drag-region={false}
+                  onClick={handleExportFeeds}
+                  disabled={seedLoading}
+                >
+                  导出订阅
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-[11px]"
+                  data-tauri-drag-region={false}
+                  onClick={handleImportButtonClick}
+                  disabled={seedLoading}
+                >
+                  导入订阅
+                </Button>
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={handleImportFeeds}
+                  data-tauri-drag-region={false}
+                />
+              </div>
             </div>
 
             {/* Categories & Feeds List */}
@@ -1615,116 +1836,137 @@ function App() {
               </div>
 
               {/* Categories */}
-              {categories.map((category) => (
-                <div key={category.id} className="px-3 py-1">
-                  <div className="px-3 py-0.5 text-[10px] font-semibold text-muted-foreground tracking-wide flex items-center justify-between gap-2 leading-tight">
-                    <span className="truncate" title={category.name}>
-                      {category.name}
-                    </span>
-                    <button
-                      type="button"
-                      className="text-xs text-muted-foreground hover:text-destructive"
-                      onClick={() => handleDeleteCategory(category.id)}
-                      data-tauri-drag-region={false}
-                      aria-label="删除分类"
-                      title="删除分类"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                  {/* Feeds under this category */}
-                  {feeds
-                    .filter((feed) => feed.category_id === category.id)
-                    .map((feed) => (
-                      <div
-                        key={feed.id}
-                        className={`group w-full px-3 py-2 rounded-md text-sm transition-colors ${
-                          selectedFeed === feed.id
-                            ? "bg-accent text-accent-foreground"
-                            : "hover:bg-accent/50"
-                        }`}
+              {categories.map((category) => {
+                const categoryFeeds = feedsByCategory.get(category.id) ?? [];
+                const isCollapsed = collapsedCategories[category.id] ?? false;
+
+                return (
+                  <div key={category.id} className="px-3 py-1">
+                    <div className="flex items-center justify-between gap-2 px-3 py-0.5 text-[10px] font-semibold text-muted-foreground tracking-wide leading-tight">
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-foreground"
+                        onClick={() =>
+                          setCollapsedCategories((current) => ({
+                            ...current,
+                            [category.id]: !(current[category.id] ?? false),
+                          }))
+                        }
                         data-tauri-drag-region={false}
+                        aria-label={isCollapsed ? `展开分类 ${category.name}` : `折叠分类 ${category.name}`}
+                        title={isCollapsed ? "展开分类" : "折叠分类"}
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <button
-                            type="button"
-                            className="flex-1 text-left"
-                            onClick={() => {
-                              setSelectedFeed(feed.id);
-                              setSelectedCategory(null);
-                              setConfirmDeleteFeedId(null);
-                            }}
-                            data-tauri-drag-region={false}
-                          >
-                            <span className="flex items-center gap-2">
-                              {feed.favicon_url ? (
-                                <img
-                                  src={feed.favicon_url}
-                                  alt=""
-                                  className="h-4 w-4 rounded-sm"
-                                  loading="lazy"
-                                />
+                        <span className="text-xs">{isCollapsed ? "▶" : "▼"}</span>
+                        <span className="truncate" title={category.name}>
+                          {category.name}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground/80">
+                          {categoryFeeds.length}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground hover:text-destructive"
+                        onClick={() => handleDeleteCategory(category.id)}
+                        data-tauri-drag-region={false}
+                        aria-label="删除分类"
+                        title="删除分类"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    {!isCollapsed &&
+                      categoryFeeds.map((feed) => (
+                        <div
+                          key={feed.id}
+                          className={`group w-full px-3 py-2 rounded-md text-sm transition-colors ${
+                            selectedFeed === feed.id
+                              ? "bg-accent text-accent-foreground"
+                              : "hover:bg-accent/50"
+                          }`}
+                          data-tauri-drag-region={false}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              className="flex-1 text-left"
+                              onClick={() => {
+                                setSelectedFeed(feed.id);
+                                setSelectedCategory(null);
+                                setConfirmDeleteFeedId(null);
+                              }}
+                              data-tauri-drag-region={false}
+                            >
+                              <span className="flex items-center gap-2">
+                                {feed.favicon_url ? (
+                                  <img
+                                    src={feed.favicon_url}
+                                    alt=""
+                                    className="h-4 w-4 rounded-sm"
+                                    loading="lazy"
+                                  />
+                                ) : (
+                                  <span className="h-4 w-4 rounded-sm bg-muted text-[10px] text-muted-foreground flex items-center justify-center">
+                                    {feed.title.slice(0, 1)}
+                                  </span>
+                                )}
+                                <span className="truncate">{feed.title}</span>
+                              </span>
+                            </button>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              {unreadCounts.get(feed.id) ? (
+                                <span>{unreadCounts.get(feed.id)}</span>
+                              ) : null}
+                              {confirmDeleteFeedId === feed.id ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="text-destructive"
+                                    onClick={() => handleDeleteFeed(feed.id)}
+                                    data-tauri-drag-region={false}
+                                  >
+                                    确认
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="hover:text-foreground"
+                                    onClick={() => setConfirmDeleteFeedId(null)}
+                                    data-tauri-drag-region={false}
+                                  >
+                                    取消
+                                  </button>
+                                </>
                               ) : (
-                                <span className="h-4 w-4 rounded-sm bg-muted text-[10px] text-muted-foreground flex items-center justify-center">
-                                  {feed.title.slice(0, 1)}
-                                </span>
+                                <>
+                                  <button
+                                    type="button"
+                                    className="hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                                    onClick={() => handleStartEditFeed(feed)}
+                                    data-tauri-drag-region={false}
+                                    aria-label="编辑订阅源"
+                                    title="编辑订阅源"
+                                  >
+                                    编辑
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                                    onClick={() => handleRequestDeleteFeed(feed.id)}
+                                    data-tauri-drag-region={false}
+                                    aria-label="删除订阅源"
+                                    title="删除订阅源"
+                                  >
+                                    ✕
+                                  </button>
+                                </>
                               )}
-                              <span className="truncate">{feed.title}</span>
-                            </span>
-                          </button>
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            {unreadCounts.get(feed.id) ? (
-                              <span>{unreadCounts.get(feed.id)}</span>
-                            ) : null}
-                            {confirmDeleteFeedId === feed.id ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="text-destructive"
-                                  onClick={() => handleDeleteFeed(feed.id)}
-                                  data-tauri-drag-region={false}
-                                >
-                                  确认
-                                </button>
-                                <button
-                                  type="button"
-                                  className="hover:text-foreground"
-                                  onClick={() => setConfirmDeleteFeedId(null)}
-                                  data-tauri-drag-region={false}
-                                >
-                                  取消
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                <button
-                                  type="button"
-                                  className="hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
-                                  onClick={() => handleStartEditFeed(feed)}
-                                  data-tauri-drag-region={false}
-                                  aria-label="编辑订阅源"
-                                  title="编辑订阅源"
-                                >
-                                  编辑
-                                </button>
-                                <button
-                                  type="button"
-                                  className="hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                                  onClick={() => handleRequestDeleteFeed(feed.id)}
-                                  data-tauri-drag-region={false}
-                                  aria-label="删除订阅源"
-                                  title="删除订阅源"
-                                >
-                                  ✕
-                                </button>
-                              </>
-                            )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
-                </div>
-              ))}
+                      ))}
+                  </div>
+                );
+              })}
             </div>
             {selectedFeed && (
               <div className="border-t border-border p-3">
