@@ -280,6 +280,20 @@ function App() {
     return feeds.find((feed) => feed.id === selectedArticle.feed_id)?.title || null;
   }, [feeds, selectedArticle]);
 
+  useEffect(() => {
+    if (!selectedArticle) {
+      return;
+    }
+    const updatedArticle = articles.find((article) => article.id === selectedArticle.id) ?? null;
+    if (!updatedArticle) {
+      setSelectedArticle(null);
+      return;
+    }
+    if (updatedArticle !== selectedArticle) {
+      setSelectedArticle(updatedArticle);
+    }
+  }, [articles, selectedArticle]);
+
   const articleTimestamp = useCallback((article: Article) => {
     if (!article.pub_date) {
       return 0;
@@ -1278,6 +1292,8 @@ function App() {
       const result = await analyzeArticle(selectedArticle.id, force);
       if (!result) {
         setAiError(useDataStore.getState().error || "AI 分析失败");
+      } else {
+        setSelectedArticle(result);
       }
       setAiLoading(false);
     },
