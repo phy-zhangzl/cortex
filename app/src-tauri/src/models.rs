@@ -52,3 +52,16 @@ pub struct Article {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ArticleAiAnalysis {
+    pub id: String,
+    pub article_id: String,
+    pub provider: String,
+    pub model: String,
+    pub mode: String,
+    pub summary: Option<String>,
+    pub score: Option<i64>,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+}

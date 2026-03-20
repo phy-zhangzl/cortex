@@ -1,6 +1,6 @@
 [package]
 name = "cortex"
-version = "0.1.1"
+version = "0.2.0"
 description = "A lightweight RSS reader for macOS built with Tauri"
 authors = ["Zhenliang Zhang"]
 license = "MIT"

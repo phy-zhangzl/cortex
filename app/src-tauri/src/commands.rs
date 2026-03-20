@@ -1,4 +1,5 @@
-use crate::models::{Article, Category, Feed};
+use crate::models::{Article, ArticleAiAnalysis, Category, Feed};
+use crate::services::ai_service;
 use crate::services::content_service::ContentService;
 use crate::services::feed_service::FeedService;
 use crate::services::feed_service::ParsedEntry;
@@ -464,6 +465,7 @@ pub async fn analyze_article(
     state: State<'_, AppState>,
     article_id: String,
     force: Option<bool>,
+    mode: Option<String>,
 ) -> Result<Article, String> {
     let article = sqlx::query_as::<_, Article>(
         "SELECT id, feed_id, title, url, author, pub_date, summary, content, content_extracted, ai_summary, ai_score, ai_notes, ai_updated_at, is_read, is_favorite, read_progress, fetched_at, created_at, updated_at FROM articles WHERE id = ?",
@@ -477,14 +479,6 @@ pub async fn analyze_article(
         return Ok(article);
     }
 
-    let api_key = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'deepseek_api_key'")
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| e.to_string())?
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| "请先在设置中配置 DeepSeek API Key".to_string())?;
-
     let source = article
         .summary
         .clone()
@@ -496,59 +490,52 @@ pub async fn analyze_article(
     }
 
     let text: String = trimmed.chars().take(4000).collect();
-    let system_prompt = "你是科研阅读助理。请根据论文标题与摘要输出简洁的中文意译与要点。";
-    let user_prompt = format!(
-        "标题: {}\n摘要: {}\n\n请输出 JSON，字段为:\nsummary_zh: 中文意译（口语化但专业，2-4 句）\nscore: 0-100 的相关性分数\nnotes: 核心贡献或要点（3-5 条，数组或多行文本）",
-        article.title,
-        text
-    );
-
-    let payload = json!({
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 800
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response = client
-        .post("https://api.deepseek.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let status = response.status();
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("AI 请求失败: {} {}", status, body));
-    }
-
-    let response_json: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    let content = response_json["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or_else(|| "AI 返回内容为空".to_string())?;
-
-    let trimmed = content.trim();
-    let json_text = if trimmed.starts_with("{") {
-        trimmed.to_string()
-    } else if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        trimmed[start..=end].to_string()
-    } else {
-        trimmed.to_string()
+    let mode = mode.unwrap_or_else(|| "summary".to_string());
+    let ai_config = ai_service::load_config(&state.pool).await?;
+    let (system_prompt, user_prompt) = match mode.as_str() {
+        "research" => (
+            "你是科研阅读助理。请从研究问题、方法、贡献、局限四个方面解读内容。输出务必专业、简洁、结构化。",
+            format!(
+                "标题: {}\n摘要/内容: {}\n\n请输出 JSON，字段为:\nsummary_zh: 用 2-4 句概括这篇内容的研究目标、方法与结论\nscore: 0-100 的相关性/研究价值分数\nnotes: 3-5 条要点，重点写研究问题、方法亮点、主要贡献、局限或需要验证之处",
+                article.title,
+                text
+            ),
+        ),
+        "critical" => (
+            "你是批判性阅读助手。请识别论证中的假设、证据强弱、可能漏洞和需要进一步验证的部分。保持克制，不要无根据否定。",
+            format!(
+                "标题: {}\n摘要/内容: {}\n\n请输出 JSON，字段为:\nsummary_zh: 用 2-4 句概括文章核心观点，并指出最值得警惕的地方\nscore: 0-100 的可信度/说服力分数\nnotes: 3-5 条批判性要点，重点写假设、证据、漏洞、遗漏视角、需补充的数据或实验",
+                article.title,
+                text
+            ),
+        ),
+        "industry" => (
+            "你是产业分析助手。请从应用价值、行业影响、落地难点、商业意义角度解读内容。",
+            format!(
+                "标题: {}\n摘要/内容: {}\n\n请输出 JSON，字段为:\nsummary_zh: 用 2-4 句概括文章对行业/产品/市场的意义\nscore: 0-100 的产业相关性分数\nnotes: 3-5 条要点，重点写潜在应用场景、受影响行业、落地门槛、商业价值与风险",
+                article.title,
+                text
+            ),
+        ),
+        "xray" => (
+            "你是 X（Twitter）舆情与传播分析助手。请基于文章标题和摘要，推测它在 X 上可能引发的讨论、支持与质疑点、传播标签和受众兴趣。不要假装引用不存在的具体帖子；如果没有实时贴文上下文，就输出高可信的舆情推断。",
+            format!(
+                "标题: {}\n摘要/内容: {}\n\n请输出 JSON，字段为:\nsummary_zh: 用 2-4 句概括这篇内容在 X 上可能会如何被讨论，以及核心舆论焦点\nscore: 0-100 的 X 传播潜力/讨论热度分数\nnotes: 3-5 条要点，重点写潜在讨论人群、支持点、争议点、适合的标签/关键词、可能引发转发讨论的角度。不要编造具体账号或具体贴文内容",
+                article.title,
+                text
+            ),
+        ),
+        _ => (
+            "你是科研阅读助理。请根据论文标题与摘要输出简洁的中文意译与要点。",
+            format!(
+                "标题: {}\n摘要: {}\n\n请输出 JSON，字段为:\nsummary_zh: 中文意译（口语化但专业，2-4 句）\nscore: 0-100 的相关性分数\nnotes: 核心贡献或要点（3-5 条，数组或多行文本）",
+                article.title,
+                text
+            ),
+        ),
     };
 
-    let parsed: Value = serde_json::from_str(&json_text).map_err(|e| {
-        format!("AI 返回不是 JSON: {e} | raw={}", trimmed)
-    })?;
+    let parsed = ai_service::chat_json(&state.pool, system_prompt, &user_prompt, 0.3, 800).await?;
     let summary = parsed["summary_zh"].as_str().unwrap_or("").trim().to_string();
     let score = parsed["score"].as_i64().or_else(|| {
         parsed["score"].as_str().and_then(|value| value.parse::<i64>().ok())
@@ -569,6 +556,22 @@ pub async fn analyze_article(
     };
 
     let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO article_ai_analyses (id, article_id, provider, model, mode, summary, score, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&article_id)
+    .bind(&ai_config.provider)
+    .bind(&ai_config.model)
+    .bind(&mode)
+    .bind(&summary)
+    .bind(score)
+    .bind(&notes)
+    .bind(now)
+    .execute(&state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     sqlx::query(
         "UPDATE articles SET ai_summary = ?, ai_score = ?, ai_notes = ?, ai_updated_at = ?, updated_at = ? WHERE id = ?",
     )
@@ -591,6 +594,20 @@ pub async fn analyze_article(
     .map_err(|e| e.to_string())?;
 
     Ok(updated)
+}
+
+#[tauri::command]
+pub async fn list_article_ai_analyses(
+    state: State<'_, AppState>,
+    article_id: String,
+) -> Result<Vec<ArticleAiAnalysis>, String> {
+    sqlx::query_as::<_, ArticleAiAnalysis>(
+        "SELECT id, article_id, provider, model, mode, summary, score, notes, created_at FROM article_ai_analyses WHERE article_id = ? ORDER BY created_at DESC",
+    )
+    .bind(article_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

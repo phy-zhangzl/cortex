@@ -2,13 +2,14 @@ import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } f
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
-import { useDataStore } from "@/store/useDataStore";
+import { useDataStore, type ArticleAiAnalysis as AiAnalysisRecord } from "@/store/useDataStore";
 import hljs from "highlight.js";
 import "highlight.js/styles/github.css";
 import parse from "html-react-parser";
 
 // Types for our data structures
 type Article = ReturnType<typeof useDataStore.getState>["articles"][number];
+type ArticleAiAnalysis = AiAnalysisRecord;
 
 type FeedBackupFile = {
   version: number;
@@ -29,7 +30,23 @@ function App() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedFeed, setSelectedFeed] = useState<string | null>(null);
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [themeMode, setThemeMode] = useState<"light" | "dark" | "system">(() => {
+    if (typeof window === "undefined") {
+      return "system";
+    }
+    try {
+      const stored = localStorage.getItem("cortex:theme-mode");
+      return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+    } catch {
+      return "system";
+    }
+  });
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
   const [seedLoading, setSeedLoading] = useState(false);
   const [seedStatus, setSeedStatus] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -80,7 +97,7 @@ function App() {
   const [filterMode, setFilterMode] = useState<"all" | "unread" | "favorites">("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "unread" | "score">("newest");
-  const [articleLimit, setArticleLimit] = useState(50);
+  const [articleLimit, setArticleLimit] = useState(200);
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const autoSyncRunningRef = useRef(false);
@@ -96,9 +113,17 @@ function App() {
   );
   const [activeTocId, setActiveTocId] = useState<string | null>(null);
   const [isTocOpen, setIsTocOpen] = useState(false);
+  const [aiProvider, setAiProvider] = useState<"grok2api" | "deepseek">("grok2api");
+  const [aiBaseUrlInput, setAiBaseUrlInput] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
+  const [aiModelInput, setAiModelInput] = useState("");
+  const [apiMode, setApiMode] = useState<"summary" | "research" | "critical" | "industry" | "xray">("summary");
   const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean | null>(null);
   const [apiKeySaving, setApiKeySaving] = useState(false);
+  const [showAiConfig, setShowAiConfig] = useState(false);
+  const [activeAnalysisId, setActiveAnalysisId] = useState<string | null>(null);
+  const [scopedArticles, setScopedArticles] = useState<Article[] | null>(null);
+  const [aiAnalyses, setAiAnalyses] = useState<ArticleAiAnalysis[]>([]);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -121,6 +146,7 @@ function App() {
     deleteFeed,
     fetchArticleContent,
     analyzeArticle,
+    listArticleAiAnalyses,
     updateArticleProgress,
     updateArticleFlags,
     getSetting,
@@ -154,7 +180,19 @@ function App() {
     }
   };
 
-  // Toggle dark mode
+  const isDarkMode = themeMode === "system" ? systemPrefersDark : themeMode === "dark";
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemPrefersDark(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add("dark");
@@ -162,6 +200,14 @@ function App() {
       document.documentElement.classList.remove("dark");
     }
   }, [isDarkMode]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("cortex:theme-mode", themeMode);
+    } catch {
+      // ignore
+    }
+  }, [themeMode]);
 
   useEffect(() => {
     try {
@@ -214,21 +260,70 @@ function App() {
     reloadAll();
   }, [reloadAll]);
 
+  const getDefaultModelForProvider = useCallback(
+    (provider: "grok2api" | "deepseek") => {
+      if (provider === "deepseek") return "deepseek-chat";
+      return "grok-2";
+    },
+    []
+  );
+
+  const getDefaultBaseUrlForProvider = useCallback(
+    (provider: "grok2api" | "deepseek") => {
+      if (provider === "deepseek") return "https://api.deepseek.com/v1";
+      return "";
+    },
+    []
+  );
+
+  const loadAiProviderConfig = useCallback(
+    async (provider: "grok2api" | "deepseek") => {
+      const providerKey = provider.replace(/-/g, "_");
+      const [baseUrl, apiKey, model] = await Promise.all([
+        getSetting(`ai_${providerKey}_base_url`),
+        getSetting(`ai_${providerKey}_api_key`),
+        getSetting(`ai_${providerKey}_model`),
+      ]);
+      const resolvedBaseUrl = baseUrl || getDefaultBaseUrlForProvider(provider);
+      const resolvedModel = model || getDefaultModelForProvider(provider);
+      setAiProvider(provider);
+      setAiBaseUrlInput(resolvedBaseUrl);
+      setApiKeyInput(apiKey || "");
+      setAiModelInput(resolvedModel);
+      setApiKeyConfigured(
+        !!resolvedBaseUrl.trim() && !!(apiKey || "").trim() && !!resolvedModel.trim()
+      );
+    },
+    [getDefaultBaseUrlForProvider, getDefaultModelForProvider, getSetting]
+  );
+
   useEffect(() => {
-    getSetting("deepseek_api_key").then((val) => {
-      setApiKeyConfigured(!!val && val.trim().length > 0);
+    getSetting("ai_provider").then((provider) => {
+      const resolved = provider === "deepseek" || provider === "grok2api" ? provider : "grok2api";
+      loadAiProviderConfig(resolved);
     });
-  }, [getSetting]);
+  }, [getSetting, loadAiProviderConfig]);
 
   const handleSaveApiKey = async () => {
-    const trimmed = apiKeyInput.trim();
-    if (!trimmed) return;
+    const baseUrl = aiBaseUrlInput.trim();
+    const apiKey = apiKeyInput.trim();
+    const model = aiModelInput.trim() || getDefaultModelForProvider(aiProvider);
+    if (!baseUrl || !apiKey || !model) return;
+    const providerKey = aiProvider.replace(/-/g, "_");
     setApiKeySaving(true);
-    const ok = await setSetting("deepseek_api_key", trimmed);
+    const results = await Promise.all([
+      setSetting("ai_provider", aiProvider),
+      setSetting("ai_base_url", baseUrl),
+      setSetting("ai_api_key", apiKey),
+      setSetting("ai_model", model),
+      setSetting(`ai_${providerKey}_base_url`, baseUrl),
+      setSetting(`ai_${providerKey}_api_key`, apiKey),
+      setSetting(`ai_${providerKey}_model`, model),
+    ]);
     setApiKeySaving(false);
-    if (ok) {
+    if (results.every(Boolean)) {
       setApiKeyConfigured(true);
-      setApiKeyInput("");
+      setShowAiConfig(false);
     }
   };
 
@@ -240,6 +335,45 @@ function App() {
     const feed = feeds.find((item) => item.id === selectedFeed);
     setSelectedFeedCategoryId(feed?.category_id ?? null);
   }, [feeds, selectedFeed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedFeed) {
+      setScopedArticles(null);
+      return;
+    }
+    invoke<Article[]>("list_articles", { feedId: selectedFeed, limit: 500 })
+      .then((items) => {
+        if (!cancelled) {
+          setScopedArticles(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setScopedArticles(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFeed, articles]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedArticle?.id) {
+      setAiAnalyses([]);
+      setActiveAnalysisId(null);
+      return;
+    }
+    listArticleAiAnalyses(selectedArticle.id).then((items) => {
+      if (!cancelled) {
+        setAiAnalyses(items);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [listArticleAiAnalyses, selectedArticle?.id, selectedArticle?.ai_updated_at]);
 
   const unreadCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -314,7 +448,7 @@ function App() {
   }, []);
 
   const filteredArticles = useMemo(() => {
-    let list = articles;
+    let list = selectedFeed ? scopedArticles ?? [] : articles;
     if (selectedFeed) {
       list = list.filter((article) => article.feed_id === selectedFeed);
     } else if (selectedCategory) {
@@ -375,6 +509,7 @@ function App() {
     articleTimestamp,
     feeds,
     filterMode,
+    scopedArticles,
     searchQuery,
     selectedCategory,
     selectedFeed,
@@ -412,6 +547,64 @@ function App() {
     }
     return date.toLocaleString();
   }, []);
+
+  const getAiModeLabel = useCallback((mode: string) => {
+    switch (mode) {
+      case "research":
+        return "研究视角";
+      case "critical":
+        return "批判视角";
+      case "industry":
+        return "产业视角";
+      case "xray":
+        return "X 视角";
+      default:
+        return "快速摘要";
+    }
+  }, []);
+
+  const currentAiLabel = useMemo(() => {
+    const providerLabel = aiProvider === "deepseek" ? "DeepSeek" : "Grok";
+    const modelLabel = aiModelInput.trim() || "未设置模型";
+    return `${providerLabel} · ${modelLabel}`;
+  }, [aiModelInput, aiProvider]);
+
+  const activeAnalysis = useMemo(() => {
+    if (!selectedArticle) {
+      return null;
+    }
+    if (activeAnalysisId) {
+      return aiAnalyses.find((analysis) => analysis.id === activeAnalysisId) ?? null;
+    }
+    return (
+      aiAnalyses.find(
+        (analysis) =>
+          analysis.article_id === selectedArticle.id &&
+          analysis.mode === apiMode &&
+          analysis.provider === aiProvider &&
+          analysis.model === aiModelInput.trim()
+      ) ?? null
+    );
+  }, [activeAnalysisId, aiAnalyses, aiModelInput, aiProvider, apiMode, selectedArticle]);
+
+  useEffect(() => {
+    setActiveAnalysisId(null);
+  }, [selectedArticle?.id]);
+
+  useEffect(() => {
+    setActiveAnalysisId((current) => {
+      if (!current) {
+        return current;
+      }
+      const exists = aiAnalyses.some((analysis) => analysis.id === current);
+      return exists ? current : null;
+    });
+  }, [aiAnalyses]);
+
+  const displayedAiSummary = activeAnalysis?.summary ?? selectedArticle?.ai_summary ?? null;
+  const displayedAiScore = activeAnalysis?.score ?? selectedArticle?.ai_score ?? null;
+  const displayedAiNotes = activeAnalysis?.notes ?? selectedArticle?.ai_notes ?? null;
+  const displayedAiUpdatedAt = activeAnalysis?.created_at ?? selectedArticle?.ai_updated_at ?? null;
 
   const resetFeedForm = () => {
     setFeedTitle("");
@@ -1307,7 +1500,8 @@ function App() {
       }
       setAiLoading(true);
       setAiError(null);
-      const result = await analyzeArticle(selectedArticle.id, force);
+      setActiveAnalysisId(null);
+      const result = await analyzeArticle(selectedArticle.id, force, apiMode);
       if (!result) {
         setAiError(useDataStore.getState().error || "AI 分析失败");
       } else {
@@ -1315,8 +1509,18 @@ function App() {
       }
       setAiLoading(false);
     },
-    [analyzeArticle, selectedArticle]
+    [analyzeArticle, apiMode, selectedArticle]
   );
+
+  const handleSelectAiAnalysis = useCallback((analysis: ArticleAiAnalysis) => {
+    setAiProvider(analysis.provider === "deepseek" ? "deepseek" : "grok2api");
+    setAiModelInput(analysis.model);
+    setApiMode(
+      (analysis.mode as "summary" | "research" | "critical" | "industry" | "xray") ||
+        "summary"
+    );
+    setActiveAnalysisId(analysis.id);
+  }, []);
 
   useEffect(() => {
     if (!contentHtml || !contentRef.current) {
@@ -1520,10 +1724,15 @@ function App() {
                 variant="ghost"
                 size="icon"
                 className="ml-auto h-8 w-8"
-                onClick={() => setIsDarkMode(!isDarkMode)}
+                onClick={() =>
+                  setThemeMode((current) =>
+                    current === "light" ? "dark" : current === "dark" ? "system" : "light"
+                  )
+                }
+                title={`主题：${themeMode === "system" ? "跟随系统" : themeMode === "dark" ? "深色" : "浅色"}`}
                 data-tauri-drag-region={false}
               >
-                {isDarkMode ? "☀️" : "🌙"}
+                {themeMode === "system" ? "🖥️" : isDarkMode ? "☀️" : "🌙"}
               </Button>
             </div>
 
@@ -2321,60 +2530,103 @@ function App() {
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-xs font-semibold text-muted-foreground">AI 解读</div>
                           <div className="flex items-center gap-2">
-                            {typeof selectedArticle.ai_score === "number" && (
+                            {typeof displayedAiScore === "number" && (
                               <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded-full">
-                                评分 {selectedArticle.ai_score}
+                                评分 {displayedAiScore}
                               </span>
                             )}
+                            <select
+                              value={apiMode}
+                              onChange={(e) =>
+                                setApiMode(
+                                  e.target.value as "summary" | "research" | "critical" | "industry" | "xray"
+                                )
+                              }
+                              className="no-drag bg-background border border-border rounded-md px-2 py-1 text-xs"
+                              data-tauri-drag-region={false}
+                            >
+                              <option value="summary">快速摘要</option>
+                              <option value="research">研究视角</option>
+                              <option value="critical">批判视角</option>
+                              <option value="industry">产业视角</option>
+                              <option value="xray">X 视角</option>
+                            </select>
                             <Button
                               size="sm"
                               variant="ghost"
                               data-tauri-drag-region={false}
-                              onClick={() => handleAnalyzeArticle(!!selectedArticle.ai_summary)}
+                              onClick={() => setShowAiConfig(true)}
+                            >
+                              {currentAiLabel}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              data-tauri-drag-region={false}
+                              onClick={() => handleAnalyzeArticle(!!displayedAiSummary)}
                               disabled={aiLoading}
                             >
-                              {selectedArticle.ai_summary ? "重新生成" : "生成 AI 解读"}
+                              {displayedAiSummary ? "重新生成" : "生成 AI 解读"}
                             </Button>
                           </div>
                         </div>
                         <div className="mt-2 space-y-2 text-sm text-foreground">
                           {aiLoading && (
-                            <div className="text-xs text-muted-foreground">正在生成 AI 解读...</div>
+                            <div className="text-xs text-muted-foreground">
+                              正在生成 AI 解读（{apiMode === "summary" ? "快速摘要" : apiMode === "research" ? "研究视角" : apiMode === "critical" ? "批判视角" : apiMode === "industry" ? "产业视角" : "X 视角"}）...
+                            </div>
                           )}
                           {aiError && (
                             <div className="text-xs text-destructive">{aiError}</div>
                           )}
-                          {apiKeyConfigured === false && !selectedArticle.ai_summary && (
-                            <div className="space-y-2">
-                              <div className="text-xs text-muted-foreground">
-                                需要配置 DeepSeek API Key 以使用 AI 解读
-                              </div>
-                              <div className="flex gap-2">
-                                <input
-                                  type="password"
-                                  placeholder="sk-..."
-                                  value={apiKeyInput}
-                                  onChange={(e) => setApiKeyInput(e.target.value)}
-                                  className="no-drag flex-1 bg-background border border-border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-                                  data-tauri-drag-region={false}
-                                />
-                                <Button
-                                  size="sm"
-                                  data-tauri-drag-region={false}
-                                  onClick={handleSaveApiKey}
-                                  disabled={apiKeySaving || !apiKeyInput.trim()}
-                                >
-                                  保存
-                                </Button>
-                              </div>
+                          {displayedAiSummary && (
+                            <p className="leading-relaxed text-sm">{displayedAiSummary}</p>
+                          )}
+                          {displayedAiNotes && (
+                            <div className="text-xs text-muted-foreground whitespace-pre-line">
+                              {displayedAiNotes}
                             </div>
                           )}
-                          {selectedArticle.ai_summary && (
-                            <p className="leading-relaxed text-sm">{selectedArticle.ai_summary}</p>
-                          )}
-                          {selectedArticle.ai_notes && (
-                            <div className="text-xs text-muted-foreground whitespace-pre-line">
-                              {selectedArticle.ai_notes}
+                          {aiAnalyses.length > 0 && (
+                            <div className="pt-2 border-t border-border/60 space-y-2">
+                              <div className="text-[11px] font-medium text-muted-foreground">
+                                已保存的 AI 导读版本（{aiAnalyses.length}）
+                              </div>
+                              <div className="max-h-36 overflow-y-auto space-y-1">
+                                {aiAnalyses.map((analysis) => {
+                                  const isActive =
+                                    (activeAnalysisId
+                                      ? analysis.id === activeAnalysisId
+                                      : displayedAiUpdatedAt === analysis.created_at &&
+                                        (displayedAiSummary || "") === (analysis.summary || ""));
+                                  return (
+                                    <button
+                                      key={analysis.id}
+                                      type="button"
+                                      onClick={() => handleSelectAiAnalysis(analysis)}
+                                      className={`no-drag w-full rounded-md border px-2 py-1.5 text-left text-[11px] ${
+                                        isActive
+                                          ? "border-primary bg-primary/5"
+                                          : "border-border bg-background/50 hover:bg-background"
+                                      }`}
+                                      data-tauri-drag-region={false}
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="font-medium text-foreground truncate">
+                                          {analysis.provider} · {analysis.model}
+                                        </div>
+                                        <div className="text-muted-foreground shrink-0">
+                                          {formatDateTime(analysis.created_at)}
+                                        </div>
+                                      </div>
+                                      <div className="mt-0.5 text-muted-foreground truncate">
+                                        {getAiModeLabel(analysis.mode)}
+                                        {typeof analysis.score === "number" ? ` · 评分 ${analysis.score}` : ""}
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             </div>
                           )}
                         </div>
@@ -2474,6 +2726,98 @@ function App() {
           </div>
         )}
       </main>
+
+      {showAiConfig && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-background shadow-xl">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold">AI 模型配置</div>
+                <div className="text-xs text-muted-foreground mt-0.5">保存后，再点“重新生成”即可使用新模型</div>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                data-tauri-drag-region={false}
+                onClick={() => setShowAiConfig(false)}
+              >
+                关闭
+              </Button>
+            </div>
+            <div className="space-y-3 p-4">
+              <div className="text-xs text-muted-foreground">当前使用：{currentAiLabel}</div>
+              <div className="flex gap-2">
+                <select
+                  value={aiProvider}
+                  onChange={(e) => {
+                    const nextProvider = e.target.value as "grok2api" | "deepseek";
+                    loadAiProviderConfig(nextProvider);
+                  }}
+                  className="no-drag bg-background border border-border rounded-md px-2 py-2 text-sm"
+                  data-tauri-drag-region={false}
+                >
+                  <option value="grok2api">Grok</option>
+                  <option value="deepseek">DeepSeek</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="Base URL，例如 http://127.0.0.1:8787/v1"
+                  value={aiBaseUrlInput}
+                  onChange={(e) => setAiBaseUrlInput(e.target.value)}
+                  className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  data-tauri-drag-region={false}
+                />
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  placeholder="API Key"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  data-tauri-drag-region={false}
+                />
+                <input
+                  type="text"
+                  placeholder="Model，例如 grok-2"
+                  value={aiModelInput}
+                  onChange={(e) => setAiModelInput(e.target.value)}
+                  className="no-drag flex-1 bg-background border border-border rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                  data-tauri-drag-region={false}
+                />
+              </div>
+              {apiKeyConfigured === false && (
+                <div className="text-xs text-muted-foreground">
+                  当前 provider 尚未配置完整，需填写 Base URL / API Key / Model
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+              <Button
+                size="sm"
+                variant="ghost"
+                data-tauri-drag-region={false}
+                onClick={() => setShowAiConfig(false)}
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                data-tauri-drag-region={false}
+                onClick={handleSaveApiKey}
+                disabled={
+                  apiKeySaving ||
+                  !aiBaseUrlInput.trim() ||
+                  !apiKeyInput.trim() ||
+                  !aiModelInput.trim()
+                }
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -43,6 +43,18 @@ export interface Article {
   read_progress: number;
 }
 
+export interface ArticleAiAnalysis {
+  id: string;
+  article_id: string;
+  provider: string;
+  model: string;
+  mode: string;
+  summary?: string | null;
+  score?: number | null;
+  notes?: string | null;
+  created_at: string;
+}
+
 interface DataState {
   categories: Category[];
   feeds: Feed[];
@@ -80,7 +92,8 @@ interface DataState {
   ) => Promise<number | null>;
   deleteFeed: (feedId: string) => Promise<boolean>;
   fetchArticleContent: (articleId: string) => Promise<Article | null>;
-  analyzeArticle: (articleId: string, force?: boolean) => Promise<Article | null>;
+  analyzeArticle: (articleId: string, force?: boolean, mode?: string) => Promise<Article | null>;
+  listArticleAiAnalyses: (articleId: string) => Promise<ArticleAiAnalysis[]>;
   updateArticleProgress: (articleId: string, progress: number, isRead: boolean) => Promise<void>;
   updateArticleFlags: (articleId: string, isRead: boolean, isFavorite: boolean) => Promise<void>;
   getSetting: (key: string) => Promise<string | null>;
@@ -257,11 +270,12 @@ export const useDataStore = create<DataState>((set, get) => ({
       return null;
     }
   },
-  analyzeArticle: async (articleId, force) => {
+  analyzeArticle: async (articleId, force, mode) => {
     try {
       const article = await invoke<Article>("analyze_article", {
         articleId,
         force: force ?? false,
+        mode: mode ?? "summary",
       });
       set({
         articles: get().articles.map((item) =>
@@ -272,6 +286,14 @@ export const useDataStore = create<DataState>((set, get) => ({
     } catch (error) {
       set({ error: String(error) });
       return null;
+    }
+  },
+  listArticleAiAnalyses: async (articleId) => {
+    try {
+      return await invoke<ArticleAiAnalysis[]>("list_article_ai_analyses", { articleId });
+    } catch (error) {
+      set({ error: String(error) });
+      return [];
     }
   },
   updateArticleProgress: async (articleId, progress, isRead) => {
