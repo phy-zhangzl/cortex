@@ -29,6 +29,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 feed-rs = "2"
-dom_smoothie = "0.7"
+dom_smoothie = "0.16"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "migrate"] }
 scraper = "0.24"
