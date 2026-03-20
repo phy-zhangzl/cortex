@@ -1223,8 +1223,14 @@ function App() {
     return cleaned;
   }, []);
 
+  const selectedArticleId = selectedArticle?.id ?? null;
+  const selectedArticleUrl = selectedArticle?.url ?? "";
+  const selectedArticleContent = selectedArticle?.content ?? null;
+  const selectedArticleSummary = selectedArticle?.summary ?? "";
+  const selectedArticleReadProgress = selectedArticle?.read_progress ?? 0;
+
   useEffect(() => {
-    if (!selectedArticle) {
+    if (!selectedArticleId) {
       setContentHtml("");
       setContentError(null);
       setContentSource(null);
@@ -1239,8 +1245,8 @@ function App() {
       setContentLoading(true);
       setContentError(null);
       setAiError(null);
-      if (selectedArticle.content) {
-        const html = buildContentHtml(selectedArticle.content, selectedArticle.url);
+      if (selectedArticleContent) {
+        const html = buildContentHtml(selectedArticleContent, selectedArticleUrl);
         if (!cancelled) {
           setContentHtml(html);
           setContentSource("full");
@@ -1249,16 +1255,16 @@ function App() {
         return;
       }
 
-      const article = await fetchArticleContent(selectedArticle.id);
+      const article = await fetchArticleContent(selectedArticleId);
       if (cancelled) {
         return;
       }
 
       if (article?.content) {
-        setContentHtml(buildContentHtml(article.content, article.url || selectedArticle.url));
+        setContentHtml(buildContentHtml(article.content, article.url || selectedArticleUrl));
         setContentSource("full");
       } else {
-        const fallback = article?.summary || selectedArticle.summary || "";
+        const fallback = article?.summary || selectedArticleSummary || "";
         setContentHtml(fallback);
         setContentSource(fallback.trim() ? "summary" : null);
         if (!article) {
@@ -1273,14 +1279,26 @@ function App() {
     };
 
     loadContent();
-    lastSavedProgressRef.current = selectedArticle.read_progress || 0;
-    setReadProgress(selectedArticle.read_progress || 0);
 
     return () => {
       cancelled = true;
     };
-  }, [buildContentHtml, fetchArticleContent, selectedArticle]);
+  }, [
+    buildContentHtml,
+    fetchArticleContent,
+    selectedArticleContent,
+    selectedArticleId,
+    selectedArticleSummary,
+    selectedArticleUrl,
+  ]);
 
+  useEffect(() => {
+    if (!selectedArticleId) {
+      return;
+    }
+    lastSavedProgressRef.current = selectedArticleReadProgress;
+    setReadProgress(selectedArticleReadProgress);
+  }, [selectedArticleId, selectedArticleReadProgress]);
 
   const handleAnalyzeArticle = useCallback(
     async (force?: boolean) => {
