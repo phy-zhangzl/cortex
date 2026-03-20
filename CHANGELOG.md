@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-03-20
+
+### Fixed
+- Fixed residual flicker when switching between saved AI analysis perspectives in the article reader and DMG release build.
+
 ## [0.2.0] - 2026-03-20
 
 ### Added
