@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-11-24
+
+A reset around the core loop: subscribe to good sources, skim what's new every day, read comfortably, keep what matters.
+
+### Added
+- Bilingual reading on demand: paragraph-by-paragraph translation via a self-hosted Ollama server, shown under each paragraph (original / bilingual / translation-only, `t` / `⇧T`). Translations are cached locally.
+- Local archive for favorites: starring an article saves its full text with images inlined into the local database, so it survives the feed or the web page disappearing.
+- Favorites survive feed deletion (they are detached and keep the source name).
+- Category management: create, rename, reorder (drag), delete; drag feeds between categories; unread counts per feed and category.
+- Feed discovery: paste a site's homepage and the RSS/Atom address is found automatically.
+- OPML import/export (old JSON backups can still be imported).
+- Concurrent sync of all feeds, on launch and on a configurable interval; mark-all-read per scope; reading position restore.
+- Single-mode AI summary (`s`) using the same Ollama model.
+- Read-later queue (`l`), kept forever like favorites.
+- Feed health manager: active / slow / dormant / failing feeds at a glance.
+- Export favorites (or a single article) as Markdown with images.
+- 30-day article retention (favorites and read-later are kept).
+- Redesigned UI: consistent icon buttons with shortcut tooltips, segmented controls, popovers, typography options (size, serif/sans, line width), refined light and dark themes.
+
+### Changed
+- Frontend split from a single 2,800-line component into sidebar / list / reader / dialogs with one store.
+- All article HTML now goes through an allowlist sanitizer and layout normalizer (previously only WeChat content was cleaned).
+- Article lists load without bodies and page from SQLite; feeds dedupe articles with a unique index.
+- SQLite connections enable foreign keys on every pooled connection, WAL mode and a busy timeout.
+
+### Removed
+- Multi-perspective AI analysis (research / critical / industry / X), analysis history, and the Grok/DeepSeek provider layer, including `.env` configuration. Old AI settings and stored API keys are deleted by migration 013.
+- Web API sources (Tencent News author pages, Tencent Cloud columns). Existing feeds of that type remain but will show a sync error; use an RSS bridge such as RSSHub instead.
+
 ## [0.2.1] - 2026-03-20
 
 ### Fixed

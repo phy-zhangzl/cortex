@@ -1,6 +1,6 @@
 [package]
 name = "cortex"
-version = "0.2.1"
+version = "0.3.0"
 description = "A lightweight RSS reader for macOS built with Tauri"
 authors = ["Zhenliang Zhang"]
 license = "MIT"
@@ -21,7 +21,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -32,3 +31,4 @@ feed-rs = "2"
 dom_smoothie = "0.7"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "chrono", "migrate"] }
 scraper = "0.24"
+base64 = "0.22"

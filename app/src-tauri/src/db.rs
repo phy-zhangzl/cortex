@@ -13,7 +13,10 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
     let db_url = format!("sqlite:{}", db_path.to_string_lossy());
     let options = SqliteConnectOptions::from_str(&db_url)
         .map_err(|e| e.to_string())?
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -21,12 +24,10 @@ pub async fn init_db(app: &AppHandle) -> Result<SqlitePool, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    sqlx::query("PRAGMA foreign_keys = ON;")
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    sqlx::migrate!("./migrations")
+    let mut migrator = sqlx::migrate!("./migrations");
+    // Tolerate migrations that were applied by an unreleased build and later removed.
+    migrator.set_ignore_missing(true);
+    migrator
         .run(&pool)
         .await
         .map_err(|e| e.to_string())?;

@@ -1,42 +1,80 @@
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
 input,
-button {
+button,
+select {
   outline: none;
 }
 
+/* ── reader body ─────────────────────────────────────────── */
+.reader-content {
+  line-height: 1.75;
+}
 .reader-content img {
-  max-width: min(100%, calc(var(--reader-font-size, 18px) * 28)) !important;
-  max-height: min(60vh, calc(var(--reader-font-size, 18px) * 24)) !important;
+  display: block;
+  max-width: 100% !important;
+  max-height: 70vh;
   width: auto !important;
   height: auto !important;
-  margin-left: auto;
-  margin-right: auto;
+  margin: 1.2em auto;
 }
-
-.reader-content [data-source="wechat"] img {
-  max-width: min(72%, calc(var(--reader-font-size, 18px) * 18)) !important;
-  max-height: min(42vh, calc(var(--reader-font-size, 18px) * 14)) !important;
-}
-
-.reader-content img[data-inline-formula="true"] {
-  display: inline-block !important;
-  max-width: min(12em, 45%) !important;
-  max-height: 2.2em !important;
-  width: auto !important;
-  height: auto !important;
-  margin: 0 0.2em !important;
+.reader-content img[data-inline="true"] {
+  display: inline-block;
+  max-height: 1.6em;
+  margin: 0 0.15em;
   vertical-align: middle;
   border-radius: 0 !important;
+}
+.reader-content table {
+  display: block;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+.reader-content pre {
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+.reader-content .hljs {
+  background: transparent;
+  padding: 0;
+}
+.dark .reader-content .hljs {
+  color: inherit;
+}
+.reader-content a {
+  word-break: break-word;
+}
+
+/* ── bilingual ───────────────────────────────────────────── */
+.reader-content .cx-tr {
+  margin-top: -0.6em;
+  color: hsl(var(--muted-foreground));
+  border-left: 2px solid hsl(var(--border));
+  padding-left: 0.8em;
+}
+.reader-content li > .cx-tr,
+.reader-content td > .cx-tr,
+.reader-content th > .cx-tr {
+  margin: 0.2em 0 0;
+}
+.reader-content .cx-tr-heading {
+  margin-top: -0.4em;
+  font-weight: 600;
+}
+.cx-original .reader-content .cx-tr {
+  display: none;
+}
+.cx-translated .reader-content .cx-src {
+  display: none;
+}
+.cx-translated .reader-content .cx-tr {
+  color: inherit;
+  border-left: 0;
+  padding-left: 0;
+  margin-top: 1.25em;
 }

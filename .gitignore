@@ -21,3 +21,6 @@ pnpm-debug.log*
 # Local app data / exports
 *.db-shm
 *.db-wal
+
+# Local secrets (no longer read by the app)
+.env

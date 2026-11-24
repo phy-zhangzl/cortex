@@ -1,7 +1,7 @@
 {
   "name": "cortex",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,16 +16,12 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-sql": "^2.3.2",
     "highlight.js": "^11.11.1",
-    "html-react-parser": "^5.2.16",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
-    "@radix-ui/react-slot": "^1.2.4",
-    "@tailwindcss/line-clamp": "^0.4.4",
     "@tailwindcss/typography": "^0.5.19",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
