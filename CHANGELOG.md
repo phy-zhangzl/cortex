@@ -17,7 +17,9 @@ A reset around the core loop: subscribe to good sources, skim what's new every d
 - Single-mode AI summary (`s`) using the same Ollama model.
 - Read-later queue (`l`), kept forever like favorites.
 - Feed health manager: active / slow / dormant / failing feeds at a glance.
-- Export favorites (or a single article) as Markdown with images.
+- Collections (folders) for favorites, folded under 收藏 in the sidebar and shown as filter chips (全部 / 未分类 / each folder) at the top of the favorites list; create / rename / reorder / delete, drag articles onto a folder or chip, or choose from the reader's star button.
+- Export favorites (or a single article) as Markdown; images are always downloaded and saved as files (even for articles that were never archived), grouped by collection.
+- More reliable image saving: retry with the article as Referer for hotlink-protected hosts, detect the real image type from the bytes, and resolve lazy-loaded images (`data-*`, `srcset`, `<picture>`).
 - 30-day article retention (favorites and read-later are kept).
 - Redesigned UI: consistent icon buttons with shortcut tooltips, segmented controls, popovers, typography options (size, serif/sans, line width), refined light and dark themes.
 

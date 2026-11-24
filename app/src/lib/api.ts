@@ -6,6 +6,13 @@ export interface Category {
   sort_order: number;
 }
 
+export interface Collection {
+  id: string;
+  name: string;
+  sort_order: number;
+  count: number;
+}
+
 export interface Feed {
   id: string;
   title: string;
@@ -30,6 +37,7 @@ export interface ArticleListItem {
   is_favorite: boolean;
   read_later: boolean;
   is_archived: boolean;
+  collection_id: string | null;
 }
 
 export interface Article {
@@ -50,12 +58,15 @@ export interface Article {
   is_favorite: boolean;
   read_later: boolean;
   read_progress: number;
+  collection_id: string | null;
 }
 
 export type Scope =
   | { kind: "all" }
   | { kind: "favorites" }
   | { kind: "later" }
+  | { kind: "collection"; id: string }
+  | { kind: "unfiled" }
   | { kind: "uncategorized" }
   | { kind: "category"; id: string }
   | { kind: "feed"; id: string };
@@ -113,6 +124,14 @@ export const api = {
   deleteCategory: (categoryId: string) => invoke<void>("delete_category", { categoryId }),
   reorderCategories: (orderedIds: string[]) => invoke<void>("reorder_categories", { orderedIds }),
 
+  listCollections: () => invoke<Collection[]>("list_collections"),
+  createCollection: (name: string) => invoke<Collection>("create_collection", { name }),
+  renameCollection: (collectionId: string, name: string) => invoke<void>("rename_collection", { collectionId, name }),
+  deleteCollection: (collectionId: string) => invoke<void>("delete_collection", { collectionId }),
+  reorderCollections: (orderedIds: string[]) => invoke<void>("reorder_collections", { orderedIds }),
+  setArticleCollection: (articleId: string, collectionId: string | null) =>
+    invoke<void>("set_article_collection", { articleId, collectionId }),
+
   listFeeds: () => invoke<Feed[]>("list_feeds"),
   discoverFeed: (url: string) => invoke<DiscoveredFeed>("discover_feed", { url }),
   createFeed: (p: { title: string; url: string; siteUrl: string | null; categoryId: string | null }) =>
@@ -143,7 +162,7 @@ export const api = {
     invoke<void>("set_read_later", { articleId, readLater }),
   updateProgress: (articleId: string, progress: number) =>
     invoke<void>("update_progress", { articleId, progress }),
-  fetchImage: (url: string) => invoke<string>("fetch_image", { url }),
+  fetchImage: (url: string, referer: string | null) => invoke<string>("fetch_image", { url, referer }),
   saveArchive: (articleId: string, html: string) => invoke<void>("save_archive", { articleId, html }),
 
   getLlmConfig: () => invoke<LlmConfig>("get_llm_config"),

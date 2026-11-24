@@ -23,9 +23,10 @@ const yaml = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '
  * Converts an article to Markdown. Inlined (archived) images are written as separate
  * files under `assets/` so the notes stay small and portable (Obsidian etc.).
  */
-export function articleToMarkdown(article: Article, baseName: string): ExportFile[] {
-  const source = article.archived_html || article.content || article.summary || "";
+export function articleToMarkdown(article: Article, baseName: string, dir = "", htmlOverride?: string): ExportFile[] {
+  const source = htmlOverride ?? (article.archived_html || article.content || article.summary || "");
   const { html } = cleanArticleHtml(source, article.url, article.title);
+  const prefix = dir ? `${dir}/` : "";
   const doc = new DOMParser().parseFromString(html, "text/html");
   const assets: ExportFile[] = [];
 
@@ -72,7 +73,7 @@ export function articleToMarkdown(article: Article, baseName: string): ExportFil
     const match = src.match(/^data:([^;]+);base64,(.*)$/);
     if (match) {
       const name = `assets/${baseName}-${assets.length + 1}.${EXT[match[1]] ?? "img"}`;
-      assets.push({ path: name, base64: match[2] });
+      assets.push({ path: prefix + name, base64: match[2] });
       return `![${alt}](${encodeURI(name)})`;
     }
     return src ? `![${alt}](${src})` : "";
@@ -151,7 +152,7 @@ export function articleToMarkdown(article: Article, baseName: string): ExportFil
     .join("\n");
 
   const markdown = `${meta}\n\n# ${article.title}\n\n${body}\n\n---\n\n原文：<${article.url}>\n`;
-  return [{ path: `${baseName}.md`, text: markdown }, ...assets];
+  return [{ path: `${prefix}${baseName}.md`, text: markdown }, ...assets];
 }
 
 export function exportBaseName(article: Article): string {

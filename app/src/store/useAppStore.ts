@@ -1,8 +1,11 @@
 import { create } from "zustand";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { api, errorMessage, type ArticleListItem, type Category, type Feed, type Scope, type SyncReport } from "@/lib/api";
-import { archiveArticle } from "@/lib/archive";
-import { articleToMarkdown, exportBaseName, type ExportFile } from "@/lib/markdown";
+import {
+  api, errorMessage, type ArticleListItem, type Category, type Collection, type Feed, type Scope, type SyncReport,
+} from "@/lib/api";
+import { archiveArticle, inlineImages, loadBestContent } from "@/lib/archive";
+import { cleanArticleHtml } from "@/lib/content";
+import { articleToMarkdown, exportBaseName, safeFileName, type ExportFile } from "@/lib/markdown";
 import { readPref, writePref } from "@/lib/prefs";
 
 const PAGE_SIZE = 100;
@@ -14,11 +17,17 @@ export interface Toast {
 }
 
 /** Scopes that are collections you curate, not inboxes: never filter by unread. */
-export const isCollection = (scope: Scope) => scope.kind === "favorites" || scope.kind === "later";
+export const isCollection = (scope: Scope) =>
+  scope.kind === "favorites" || scope.kind === "later" || scope.kind === "collection" || scope.kind === "unfiled";
+
+/** All scopes that show favorites (all / unfiled / one collection). */
+export const isFavoritesScope = (scope: Scope) =>
+  scope.kind === "favorites" || scope.kind === "collection" || scope.kind === "unfiled";
 
 interface AppState {
   categories: Category[];
   feeds: Feed[];
+  collections: Collection[];
   counts: { unread: number; favorites: number; later: number };
 
   scope: Scope;
@@ -47,6 +56,8 @@ interface AppState {
   markScopeRead: () => Promise<void>;
   toggleFavorite: (id: string) => Promise<void>;
   toggleReadLater: (id: string) => Promise<void>;
+  /** Favorite (if needed) and file into a folder; `null` = unsorted favorites. */
+  fileToCollection: (id: string, collectionId: string | null) => Promise<void>;
   exportMarkdown: (ids: string[] | "favorites") => Promise<void>;
   patchArticle: (id: string, patch: Partial<ArticleListItem>) => void;
 
@@ -60,6 +71,7 @@ let toastSeq = 0;
 export const useAppStore = create<AppState>((set, get) => ({
   categories: [],
   feeds: [],
+  collections: [],
   counts: { unread: 0, favorites: 0, later: 0 },
 
   scope: { kind: "all" },
@@ -76,8 +88,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshSidebar: async () => {
     try {
-      const [categories, feeds, counts] = await Promise.all([api.listCategories(), api.listFeeds(), api.getCounts()]);
-      set({ categories, feeds, counts });
+      const [categories, feeds, counts, collections] = await Promise.all([
+        api.listCategories(),
+        api.listFeeds(),
+        api.getCounts(),
+        api.listCollections(),
+      ]);
+      set({ categories, feeds, counts, collections });
     } catch (error) {
       get().toast(`加载订阅失败：${errorMessage(error)}`, "error");
     }
@@ -216,7 +233,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await api.setFavorite(id, next);
       if (!next) {
+        get().patchArticle(id, { collection_id: null });
         get().toast("已取消收藏");
+        void get().refreshSidebar();
+        if (get().scope.kind === "collection" || get().scope.kind === "unfiled") void get().loadArticles();
         return;
       }
       get().toast("已收藏，正在保存到本地…");
@@ -228,6 +248,30 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
     } catch (error) {
       get().toast(`本地存档失败：${errorMessage(error)}`, "error");
+    }
+  },
+
+  fileToCollection: async (id, collectionId) => {
+    const item = get().articles.find((a) => a.id === id);
+    const article = item ?? (await api.getArticle(id).catch(() => null));
+    if (!article) return;
+    const wasFavorite = article.is_favorite;
+    get().patchArticle(id, { is_favorite: true, collection_id: collectionId });
+    try {
+      await api.setArticleCollection(id, collectionId);
+      const name = get().collections.find((c) => c.id === collectionId)?.name;
+      await get().refreshSidebar();
+      if (get().scope.kind === "collection" || get().scope.kind === "unfiled") void get().loadArticles();
+      if (wasFavorite) {
+        get().toast(name ? `已移到「${name}」` : "已移出收藏夹", "success");
+        return;
+      }
+      get().toast(name ? `已收藏到「${name}」，正在保存到本地…` : "已收藏，正在保存到本地…");
+      const { images, failedImages } = await archiveArticle(id);
+      get().patchArticle(id, { is_archived: true });
+      get().toast(failedImages > 0 ? `已保存到本地（${images - failedImages}/${images} 张图片）` : "已完整保存到本地", "success");
+    } catch (error) {
+      get().toast(errorMessage(error), "error");
     }
   },
 
@@ -248,30 +292,43 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   exportMarkdown: async (target) => {
     try {
-      const ids =
-        target === "favorites"
-          ? (await api.listArticles({ scope: { kind: "favorites" }, unreadOnly: false, search: null, limit: 500, offset: 0 })).map(
-              (a) => a.id,
-            )
-          : target;
+      const all = target === "favorites";
+      const ids = all
+        ? (await api.listArticles({ scope: { kind: "favorites" }, unreadOnly: false, search: null, limit: 500, offset: 0 })).map((a) => a.id)
+        : target;
       if (ids.length === 0) {
         get().toast("没有可导出的文章");
         return;
       }
-      get().toast(`正在导出 ${ids.length} 篇…`);
+      const folderNames = new Map(get().collections.map((c) => [c.id, safeFileName(c.name, 60)]));
       const files: ExportFile[] = [];
       const used = new Set<string>();
+      let missingImages = 0;
+      get().toast(ids.length > 1 ? `正在导出 ${ids.length} 篇（含图片）…` : "正在导出，下载图片中…");
       for (const id of ids) {
-        const article = await api.getArticle(id);
+        let article = await api.getArticle(id);
+        // Archived articles already carry their images; anything else gets them downloaded now.
+        let html: string | undefined;
+        if (!article.archived_html) {
+          article = await loadBestContent(id);
+          const cleaned = cleanArticleHtml(article.content || article.summary || "", article.url, article.title).html;
+          const inlined = await inlineImages(cleaned, article.url);
+          missingImages += inlined.failed;
+          html = inlined.html;
+        }
+        const dir = all ? (article.collection_id ? folderNames.get(article.collection_id) ?? "" : "") : "";
         let base = exportBaseName(article);
-        for (let n = 2; used.has(base); n++) base = `${exportBaseName(article)} (${n})`;
-        used.add(base);
-        files.push(...articleToMarkdown(article, base));
+        for (let n = 2; used.has(`${dir}/${base}`); n++) base = `${exportBaseName(article)} (${n})`;
+        used.add(`${dir}/${base}`);
+        files.push(...articleToMarkdown(article, base, dir, html));
       }
       const stamp = new Date().toISOString().slice(0, 10);
-      const folder = ids.length === 1 ? "Cortex 导出" : `Cortex 收藏 ${stamp}`;
+      const folder = ids.length === 1 && !all ? "Cortex 导出" : `Cortex 收藏 ${stamp}`;
       const path = await api.exportFiles(folder, files);
-      get().toast(`已导出到「下载/${folder}」`, "success");
+      get().toast(
+        missingImages > 0 ? `已导出到「下载/${folder}」，${missingImages} 张图片下载失败` : `已导出到「下载/${folder}」`,
+        missingImages > 0 ? "info" : "success",
+      );
       const first = files.find((f) => f.path.endsWith(".md"));
       void revealItemInDir(first && ids.length === 1 ? `${path}/${first.path}` : path).catch(() => undefined);
     } catch (error) {

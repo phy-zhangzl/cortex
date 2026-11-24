@@ -9,6 +9,14 @@ pub struct Category {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Feed {
     pub id: String,
     pub title: String,
@@ -56,11 +64,12 @@ pub struct ArticleListItem {
     pub is_favorite: bool,
     pub read_later: bool,
     pub is_archived: bool,
+    pub collection_id: Option<String>,
 }
 
 pub const ARTICLE_LIST_SELECT: &str = "SELECT a.id, a.feed_id, COALESCE(f.title, a.feed_title) AS feed_title, \
     a.title, a.url, a.author, a.pub_date, substr(a.summary, 1, 600) AS excerpt, a.is_read, a.is_favorite, a.read_later, \
-    (a.archived_html IS NOT NULL) AS is_archived \
+    (a.archived_html IS NOT NULL) AS is_archived, a.collection_id \
     FROM articles a LEFT JOIN feeds f ON f.id = a.feed_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -82,11 +91,12 @@ pub struct Article {
     pub is_favorite: bool,
     pub read_later: bool,
     pub read_progress: f64,
+    pub collection_id: Option<String>,
 }
 
 pub const ARTICLE_SELECT: &str = "SELECT a.id, a.feed_id, COALESCE(f.title, a.feed_title) AS feed_title, \
     a.title, a.url, a.author, a.pub_date, a.summary, a.content, a.content_extracted, a.archived_html, a.archived_at, \
-    a.ai_summary, a.is_read, a.is_favorite, a.read_later, a.read_progress \
+    a.ai_summary, a.is_read, a.is_favorite, a.read_later, a.read_progress, a.collection_id \
     FROM articles a LEFT JOIN feeds f ON f.id = a.feed_id";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { useAppStore } from "@/store/useAppStore";
-import { api, errorMessage, type Category, type Feed, type Scope } from "@/lib/api";
+import { isFavoritesScope, useAppStore } from "@/store/useAppStore";
+import { api, errorMessage, type Category, type Collection, type Feed, type Scope } from "@/lib/api";
 import { readPref, writePref } from "@/lib/prefs";
 import { cn } from "@/lib/utils";
 import { FeedIcon } from "./FeedIcon";
@@ -41,7 +41,9 @@ export function Sidebar({
   onOpenSettings: () => void;
   onOpenManager: () => void;
 }) {
-  const { categories, feeds, counts, scope, setScope, syncing, syncAll, refreshSidebar, toast, lastSync } = useAppStore();
+  const {
+    categories, feeds, collections, counts, scope, setScope, syncing, syncAll, refreshSidebar, toast, lastSync, fileToCollection,
+  } = useAppStore();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readPref("collapsed-categories", {}));
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const menuPos = useRef({ x: 0, y: 0 });
@@ -52,6 +54,15 @@ export function Sidebar({
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [draggingFeed, setDraggingFeed] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Category | null>(null);
+  const [confirmDeleteCollection, setConfirmDeleteCollection] = useState<Collection | null>(null);
+  const [creatingCollection, setCreatingCollection] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
+  const [favCollapsed, setFavCollapsed] = useState<boolean>(() => readPref("favorites-collapsed", true));
+  const setFavFolded = (value: boolean) => {
+    writePref("favorites-collapsed", value);
+    setFavCollapsed(value);
+  };
   const [, tick] = useState(0);
 
   // Keep "synced 3 minutes ago" fresh.
@@ -162,6 +173,107 @@ export function Sidebar({
     setCreating(false);
     setNewName("");
     if (name) await run(() => api.createCategory(name));
+  };
+
+  const submitCreateCollection = async () => {
+    const name = newCollectionName.trim();
+    setCreatingCollection(false);
+    setNewCollectionName("");
+    if (name) await run(() => api.createCollection(name));
+  };
+
+  const collectionMenu = (collection: Collection): MenuItem[] => [
+    {
+      label: "重命名",
+      icon: <Icon name="edit" className="h-3.5 w-3.5" />,
+      onSelect: () => {
+        setRenamingCollectionId(collection.id);
+        setRenameValue(collection.name);
+      },
+    },
+    { separator: true },
+    {
+      label: "删除收藏夹…",
+      danger: true,
+      icon: <Icon name="trash" className="h-3.5 w-3.5" />,
+      onSelect: () => setConfirmDeleteCollection(collection),
+    },
+  ];
+
+  const submitRenameCollection = async (collection: Collection) => {
+    const name = renameValue.trim();
+    setRenamingCollectionId(null);
+    if (name && name !== collection.name) await run(() => api.renameCollection(collection.id, name));
+  };
+
+  const collectionRow = (collection: Collection) => {
+    const active = sameScope(scope, { kind: "collection", id: collection.id });
+    const dropId = `collection:${collection.id}`;
+    return (
+      <div
+        key={collection.id}
+        role="button"
+        draggable={renamingCollectionId !== collection.id}
+        onDragStart={(e) => {
+          e.dataTransfer.setData("cortex/collection", collection.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        onDragOver={(e) => {
+          const types = e.dataTransfer.types;
+          if (types.includes("cortex/article") || types.includes("cortex/collection")) {
+            e.preventDefault();
+            setDropTarget(dropId);
+          }
+        }}
+        onDragLeave={() => setDropTarget((t) => (t === dropId ? null : t))}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDropTarget(null);
+          const articleId = e.dataTransfer.getData("cortex/article");
+          const draggedId = e.dataTransfer.getData("cortex/collection");
+          if (articleId) void fileToCollection(articleId, collection.id);
+          else if (draggedId && draggedId !== collection.id) {
+            const ids = collections.map((c) => c.id).filter((id) => id !== draggedId);
+            ids.splice(ids.indexOf(collection.id), 0, draggedId);
+            void run(() => api.reorderCollections(ids));
+          }
+        }}
+        onContextMenu={(e) => openMenu(e, collectionMenu(collection))}
+        onClick={() => setScope({ kind: "collection", id: collection.id })}
+        className={cn(
+          rowBase,
+          "h-[30px] pl-7",
+          rowState(active),
+          dropTarget === dropId && "bg-primary/10 ring-1 ring-inset ring-primary/40",
+        )}
+      >
+        <Icon name="folder" className={cn("h-[15px] w-[15px] shrink-0", active ? "text-primary" : "text-muted-foreground")} />
+        {renamingCollectionId === collection.id ? (
+          <input
+            autoFocus
+            className="no-drag h-6 flex-1 rounded-md border border-ring/50 bg-background px-1.5 text-[13px] outline-none ring-[3px] ring-ring/15"
+            value={renameValue}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={() => void submitRenameCollection(collection)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void submitRenameCollection(collection);
+              if (e.key === "Escape") setRenamingCollectionId(null);
+            }}
+          />
+        ) : (
+          <span className="flex-1 truncate text-left">{collection.name}</span>
+        )}
+        <span className="text-[11px] tabular-nums text-muted-foreground group-hover:hidden">{collection.count || ""}</span>
+        <button
+          aria-label="收藏夹操作"
+          className="hidden h-5 w-5 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground group-hover:flex"
+          onClick={(e) => openMenu(e, collectionMenu(collection))}
+        >
+          <Icon name="more" className="h-4 w-4" />
+        </button>
+      </div>
+    );
   };
 
   const rowBase =
@@ -302,7 +414,81 @@ export function Sidebar({
         <div className="space-y-px">
           {navItem({ kind: "all" }, "全部文章", counts.unread, "inbox")}
           {navItem({ kind: "later" }, "稍后读", counts.later, "clock")}
-          {navItem({ kind: "favorites" }, "收藏", counts.favorites, "star")}
+          <div
+            role="button"
+            onClick={() => setScope({ kind: "favorites" })}
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes("cortex/article")) {
+                e.preventDefault();
+                setDropTarget("__favorites__");
+                if (favCollapsed && collections.length > 0) setFavFolded(false); // reveal folders as drop targets
+              }
+            }}
+            onDragLeave={() => setDropTarget((t) => (t === "__favorites__" ? null : t))}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDropTarget(null);
+              const articleId = e.dataTransfer.getData("cortex/article");
+              if (articleId) void fileToCollection(articleId, null);
+            }}
+            className={cn(
+              rowBase,
+              "h-8 pr-1",
+              rowState(isFavoritesScope(scope)),
+              dropTarget === "__favorites__" && "bg-primary/10 ring-1 ring-inset ring-primary/40",
+            )}
+          >
+            <Icon name="star" className={cn("h-[17px] w-[17px]", isFavoritesScope(scope) ? "text-primary" : "text-muted-foreground")} />
+            <span className="flex-1 text-left">收藏</span>
+            <span className="group-hover:hidden">
+              <Count value={counts.favorites} active={isFavoritesScope(scope)} />
+            </span>
+            <span className="hidden group-hover:flex">
+              <IconButton
+                label="新建收藏夹"
+                size="sm"
+                tipAlign="end"
+                className="h-6 w-6"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setFavFolded(false);
+                  setCreatingCollection(true);
+                }}
+              >
+                <Icon name="plus" className="h-3.5 w-3.5" />
+              </IconButton>
+            </span>
+            {collections.length > 0 && (
+              <button
+                aria-label={favCollapsed ? "展开收藏夹" : "收起收藏夹"}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setFavFolded(!favCollapsed);
+                }}
+              >
+                <Icon name="chevron" className={cn("h-3 w-3 transition-transform duration-150", !favCollapsed && "rotate-90")} />
+              </button>
+            )}
+          </div>
+          {!favCollapsed && <div className="space-y-px">{collections.map(collectionRow)}</div>}
+          {creatingCollection && (
+            <input
+              autoFocus
+              placeholder="收藏夹名称，回车确认"
+              className="no-drag ml-6 mt-0.5 h-8 w-[calc(100%-1.5rem)] rounded-lg border border-ring/50 bg-background px-2.5 text-[13px] outline-none ring-[3px] ring-ring/15"
+              value={newCollectionName}
+              onChange={(e) => setNewCollectionName(e.target.value)}
+              onBlur={() => void submitCreateCollection()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitCreateCollection();
+                if (e.key === "Escape") {
+                  setCreatingCollection(false);
+                  setNewCollectionName("");
+                }
+              }}
+            />
+          )}
         </div>
 
         <div>
@@ -394,6 +580,33 @@ export function Sidebar({
       </div>
 
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+
+      <Dialog
+        open={!!confirmDeleteCollection}
+        onClose={() => setConfirmDeleteCollection(null)}
+        title={`删除收藏夹「${confirmDeleteCollection?.name ?? ""}」？`}
+        description="里面的文章仍然保留在「收藏」里，只是不再归到这个收藏夹。"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmDeleteCollection(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const target = confirmDeleteCollection!;
+                setConfirmDeleteCollection(null);
+                if (sameScope(scope, { kind: "collection", id: target.id })) setScope({ kind: "favorites" });
+                void run(() => api.deleteCollection(target.id));
+              }}
+            >
+              删除收藏夹
+            </Button>
+          </>
+        }
+      >
+        {null}
+      </Dialog>
 
       <Dialog
         open={!!confirmDelete}

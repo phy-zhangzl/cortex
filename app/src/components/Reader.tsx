@@ -52,7 +52,8 @@ function Divider() {
 }
 
 export function Reader({ articleId, focusMode, onToggleFocus }: { articleId: string; focusMode: boolean; onToggleFocus: () => void }) {
-  const { toggleFavorite, toggleReadLater, setRead, toast, articles, exportMarkdown } = useAppStore();
+  const { toggleFavorite, toggleReadLater, setRead, toast, articles, exportMarkdown, collections, fileToCollection, refreshSidebar } =
+    useAppStore();
   const listItem = articles.find((a) => a.id === articleId);
 
   const [article, setArticle] = useState<Article | null>(null);
@@ -69,11 +70,14 @@ export function Reader({ articleId, focusMode, onToggleFocus }: { articleId: str
   const [activeToc, setActiveToc] = useState<string | null>(null);
   const [typeOpen, setTypeOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [favOpen, setFavOpen] = useState(false);
+  const [newFolder, setNewFolder] = useState("");
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const typeBtn = useRef<HTMLButtonElement | null>(null);
   const moreBtn = useRef<HTMLButtonElement | null>(null);
+  const favBtn = useRef<HTMLButtonElement | null>(null);
   const translations = useRef(new Map<string, string>());
   const translatedHtml = useRef<string | null>(null);
   const job = useRef<TranslationJob | null>(null);
@@ -296,6 +300,24 @@ export function Reader({ articleId, focusMode, onToggleFocus }: { articleId: str
   const isFavorite = listItem?.is_favorite ?? article.is_favorite;
   const isLater = listItem?.read_later ?? article.read_later;
   const isRead = listItem?.is_read ?? article.is_read;
+  const collectionId = listItem ? listItem.collection_id : article.collection_id;
+  const fileTo = (id: string | null) => {
+    setFavOpen(false);
+    setArticle((a) => (a ? { ...a, is_favorite: true, collection_id: id } : a));
+    void fileToCollection(article.id, id);
+  };
+  const createFolderAndFile = async () => {
+    const name = newFolder.trim();
+    if (!name) return;
+    setNewFolder("");
+    try {
+      const created = await api.createCollection(name);
+      await refreshSidebar();
+      fileTo(created.id);
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    }
+  };
   const translating = trState.total > 0 && trState.done < trState.total;
   const feedLike = { title: article.feed_title ?? "?", url: article.url, site_url: null };
 
@@ -326,7 +348,7 @@ export function Reader({ articleId, focusMode, onToggleFocus }: { articleId: str
         <IconButton label={isLater ? "移出稍后读" : "稍后读"} shortcut="L" active={isLater} onClick={() => void toggleReadLater(article.id)}>
           <Icon name="clock" className={cn("h-[17px] w-[17px]", isLater && "text-primary")} />
         </IconButton>
-        <IconButton label={isFavorite ? "取消收藏" : "收藏并保存到本地"} shortcut="F" onClick={() => void toggleFavorite(article.id)}>
+        <IconButton ref={favBtn} label={isFavorite ? "收藏夹" : "收藏到…"} shortcut="F" active={favOpen} onClick={() => setFavOpen((v) => !v)}>
           <Icon name="star" filled={isFavorite} className={cn("h-[17px] w-[17px] transition-transform", isFavorite && "scale-110 text-star")} />
         </IconButton>
         <IconButton label="AI 摘要" shortcut="S" active={summary.open} onClick={() => void runSummary()}>
@@ -397,6 +419,51 @@ export function Reader({ articleId, focusMode, onToggleFocus }: { articleId: str
               ]}
             />
           </div>
+        </Popover>
+
+        <Popover anchor={favBtn} open={favOpen} onClose={() => setFavOpen(false)} className="w-60">
+          <div className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground">
+            {isFavorite ? "收藏夹（已保存到本地）" : "收藏到，并完整保存到本地"}
+          </div>
+          <PopoverItem
+            icon={<Icon name="star" className="h-3.5 w-3.5" />}
+            label="收藏（不分类）"
+            hint={isFavorite && !collectionId ? <Icon name="check" className="h-3.5 w-3.5 text-primary" /> : undefined}
+            onSelect={() => fileTo(null)}
+          />
+          {collections.map((c) => (
+            <PopoverItem
+              key={c.id}
+              icon={<Icon name="folder" className="h-3.5 w-3.5" />}
+              label={<span className="block max-w-[9.5rem] truncate">{c.name}</span>}
+              hint={isFavorite && collectionId === c.id ? <Icon name="check" className="h-3.5 w-3.5 text-primary" /> : undefined}
+              onSelect={() => fileTo(c.id)}
+            />
+          ))}
+          <div className="px-1 pb-1 pt-1">
+            <input
+              value={newFolder}
+              onChange={(e) => setNewFolder(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void createFolderAndFile()}
+              placeholder="+ 新建收藏夹，回车保存"
+              className="no-drag h-8 w-full rounded-lg bg-muted px-2.5 text-[12.5px] outline-none placeholder:text-muted-foreground/80 focus:bg-background focus:ring-[3px] focus:ring-ring/15"
+            />
+          </div>
+          {isFavorite && (
+            <>
+              <PopoverSeparator />
+              <PopoverItem
+                danger
+                icon={<Icon name="x" className="h-3.5 w-3.5" />}
+                label="取消收藏"
+                onSelect={() => {
+                  setFavOpen(false);
+                  setArticle((a) => (a ? { ...a, is_favorite: false, collection_id: null } : a));
+                  void toggleFavorite(article.id);
+                }}
+              />
+            </>
+          )}
         </Popover>
 
         <Popover anchor={moreBtn} open={moreOpen} onClose={() => setMoreOpen(false)} className="w-56">

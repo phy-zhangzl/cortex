@@ -39,7 +39,23 @@ const ALLOWED_ATTRS: Record<string, string[]> = {
   pre: ["class"],
 };
 
-const LAZY_SRC_ATTRS = ["data-src", "data-original", "data-actualsrc", "data-lazy-src", "data-croporisrc"];
+const LAZY_SRC_ATTRS = [
+  "data-src", "data-original", "data-original-src", "data-actualsrc", "data-lazy-src",
+  "data-croporisrc", "data-url", "data-hi-res-src", "data-full-src",
+];
+
+/** Largest candidate of a srcset ("a.jpg 480w, b.jpg 1024w" / "a.jpg 1x, b.jpg 2x"). */
+function bestFromSrcset(srcset: string | null): string | null {
+  if (!srcset) return null;
+  let best: { url: string; score: number } | null = null;
+  for (const part of srcset.split(",")) {
+    const [url, descriptor = "1x"] = part.trim().split(/\s+/);
+    if (!url) continue;
+    const score = Number.parseFloat(descriptor) * (descriptor.endsWith("w") ? 1 : 1000);
+    if (!best || score > best.score) best = { url, score: Number.isFinite(score) ? score : 0 };
+  }
+  return best?.url ?? null;
+}
 
 const WECHAT_PROMO = ["关注", "公众号", "扫码", "二维码", "广告", "推广", "赞助", "点击上方", "星标", "在看"];
 
@@ -100,21 +116,26 @@ export function cleanArticleHtml(raw: string, baseUrl?: string, title?: string):
 
   body.querySelectorAll("[hidden], [style*='display:none'], [style*='display: none']").forEach((n) => n.remove());
 
-  // Lazy-loaded images first, while data-* attributes still exist.
-  body.querySelectorAll("img").forEach((img) => {
-    for (const attr of LAZY_SRC_ATTRS) {
-      const value = img.getAttribute(attr);
-      if (value && (!img.getAttribute("src") || img.getAttribute("src")!.startsWith("data:image/gif"))) {
-        img.setAttribute("src", value);
-        break;
-      }
-    }
-  });
-  // <picture>: keep only the <img>.
+  // <picture>: keep only the <img>, borrowing the best <source> when the img has nothing usable.
   body.querySelectorAll("picture").forEach((pic) => {
     const img = pic.querySelector("img");
-    if (img) pic.replaceWith(img);
-    else pic.remove();
+    if (!img) return pic.remove();
+    if (!img.getAttribute("src") && !img.getAttribute("srcset")) {
+      const source = Array.from(pic.querySelectorAll("source")).map((s) => s.getAttribute("srcset")).find(Boolean);
+      if (source) img.setAttribute("srcset", source);
+    }
+    pic.replaceWith(img);
+  });
+  // Lazy-loaded images, while data-* attributes still exist. A tiny data: URI src is a placeholder.
+  body.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    const placeholder = !src || (src.startsWith("data:") && src.length < 2000);
+    if (!placeholder) return;
+    const lazy =
+      LAZY_SRC_ATTRS.map((attr) => img.getAttribute(attr)).find((v) => v && !v.startsWith("data:")) ||
+      bestFromSrcset(img.getAttribute("data-srcset")) ||
+      bestFromSrcset(img.getAttribute("srcset"));
+    if (lazy) img.setAttribute("src", lazy);
   });
 
   // Deepest first so containers see their already-normalized children.

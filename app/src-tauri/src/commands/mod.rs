@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod articles;
 pub mod categories;
+pub mod collections;
 pub mod feeds;
 pub mod settings;
 

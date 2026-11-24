@@ -1,6 +1,6 @@
-import { forwardRef, memo, useEffect, useMemo, useRef } from "react";
-import { isCollection, useAppStore } from "@/store/useAppStore";
-import type { ArticleListItem } from "@/lib/api";
+import { forwardRef, memo, useEffect, useMemo, useRef, useState } from "react";
+import { isCollection, isFavoritesScope, useAppStore } from "@/store/useAppStore";
+import type { ArticleListItem, Scope } from "@/lib/api";
 import { htmlToText } from "@/lib/content";
 import { cn } from "@/lib/utils";
 import { Icon, type IconName } from "./Icon";
@@ -55,6 +55,11 @@ const Row = memo(function Row({
   return (
     <div
       data-id={article.id}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("cortex/article", article.id);
+        e.dataTransfer.effectAllowed = "move";
+      }}
       onClick={() => onSelect(article.id)}
       className={cn(
         "group relative mx-2 rounded-xl px-3 py-2.5 transition-colors duration-100",
@@ -109,17 +114,24 @@ function EmptyState({ icon, title, hint }: { icon: IconName; title: string; hint
 export const ArticleList = forwardRef<HTMLInputElement>(function ArticleList(_, searchRef) {
   const {
     articles, selectedId, select, scope, feeds, categories, unreadOnly, setUnreadOnly, search, setSearch,
-    hasMore, loadMore, listLoading, markScopeRead, toggleFavorite, toggleReadLater, exportMarkdown, counts,
+    hasMore, loadMore, listLoading, markScopeRead, toggleFavorite, toggleReadLater, exportMarkdown, counts, collections,
+    setScope, fileToCollection,
   } = useAppStore();
+  const [chipDrop, setChipDrop] = useState<string | null>(null);
+  const favoritesView = isFavoritesScope(scope);
+  const unfiledCount = Math.max(0, counts.favorites - collections.reduce((sum, c) => sum + c.count, 0));
   const listRef = useRef<HTMLDivElement | null>(null);
   const searchTimer = useRef<number | undefined>(undefined);
 
   const title = useMemo(() => {
     switch (scope.kind) {
       case "favorites":
+      case "unfiled":
         return "收藏";
       case "later":
         return "稍后读";
+      case "collection":
+        return "收藏";
       case "uncategorized":
         return "未分类";
       case "category":
@@ -129,15 +141,20 @@ export const ArticleList = forwardRef<HTMLInputElement>(function ArticleList(_, 
       default:
         return "全部文章";
     }
-  }, [scope, categories, feeds]);
+  }, [scope, categories, feeds, collections]);
 
   const subtitle = useMemo(() => {
     if (scope.kind === "favorites") return `${counts.favorites} 篇 · 已保存在本地`;
+    if (scope.kind === "unfiled") return `未分类 · ${unfiledCount} 篇`;
     if (scope.kind === "later") return `${counts.later} 篇`;
+    if (scope.kind === "collection") {
+      const c = collections.find((x) => x.id === scope.id);
+      return `${c?.name ?? "收藏夹"} · ${c?.count ?? 0} 篇`;
+    }
     if (scope.kind === "feed") return feeds.find((f) => f.id === scope.id)?.unread_count ? `${feeds.find((f) => f.id === scope.id)!.unread_count} 篇未读` : "没有未读";
     if (scope.kind === "all") return counts.unread ? `${counts.unread} 篇未读` : "没有未读";
     return null;
-  }, [scope, counts, feeds]);
+  }, [scope, counts, feeds, collections, unfiledCount]);
 
   const collection = isCollection(scope);
   const feedError = scope.kind === "feed" ? feeds.find((f) => f.id === scope.id)?.last_fetch_error : null;
@@ -155,6 +172,9 @@ export const ArticleList = forwardRef<HTMLInputElement>(function ArticleList(_, 
     if (search.trim()) return <EmptyState icon="search" title="没有找到相关文章" hint="换个关键词试试" />;
     if (scope.kind === "favorites")
       return <EmptyState icon="star" title="还没有收藏" hint={<>阅读时按 <Kbd>F</Kbd> 收藏，全文和图片会保存到本地</>} />;
+    if (scope.kind === "collection")
+      return <EmptyState icon="folder" title="收藏夹是空的" hint="把文章拖到上方的收藏夹标签上，或阅读时点星标选择收藏夹" />;
+    if (scope.kind === "unfiled") return <EmptyState icon="check" title="所有收藏都已归类" />;
     if (scope.kind === "later")
       return <EmptyState icon="clock" title="稍后读是空的" hint={<>遇到想晚点再看的文章，按 <Kbd>L</Kbd> 加进来</>} />;
     if (unreadOnly) return <EmptyState icon="check" title="全部读完了" hint="新文章会在同步后出现在这里" />;
@@ -176,9 +196,13 @@ export const ArticleList = forwardRef<HTMLInputElement>(function ArticleList(_, 
             )}
           </div>
           {collection ? (
-            scope.kind === "favorites" &&
-            counts.favorites > 0 && (
-              <IconButton label="导出全部收藏为 Markdown" tipAlign="end" onClick={() => void exportMarkdown("favorites")}>
+            favoritesView &&
+            articles.length > 0 && (
+              <IconButton
+                label={scope.kind === "favorites" ? "导出全部收藏为 Markdown（按收藏夹分文件夹）" : "导出当前列表为 Markdown"}
+                tipAlign="end"
+                onClick={() => void exportMarkdown(scope.kind === "favorites" ? "favorites" : articles.map((a) => a.id))}
+              >
                 <Icon name="download" className="h-4 w-4" />
               </IconButton>
             )
@@ -198,6 +222,57 @@ export const ArticleList = forwardRef<HTMLInputElement>(function ArticleList(_, 
             </>
           )}
         </div>
+
+        {favoritesView && collections.length > 0 && (
+          <div className="no-drag -mx-1 mt-3 flex flex-wrap gap-1.5 px-1">
+            {(
+              [
+                { key: "all", target: { kind: "favorites" } as Scope, label: "全部", count: counts.favorites, fileTo: undefined },
+                { key: "unfiled", target: { kind: "unfiled" } as Scope, label: "未分类", count: unfiledCount, fileTo: null },
+                ...collections.map((c) => ({
+                  key: c.id,
+                  target: { kind: "collection", id: c.id } as Scope,
+                  label: c.name,
+                  count: c.count,
+                  fileTo: c.id as string | null,
+                })),
+              ] as Array<{ key: string; target: Scope; label: string; count: number; fileTo: string | null | undefined }>
+            ).map((chip) => {
+              const active =
+                chip.target.kind === scope.kind && ("id" in chip.target ? chip.target.id : null) === ("id" in scope ? scope.id : null);
+              return (
+                <button
+                  key={chip.key}
+                  onClick={() => setScope(chip.target)}
+                  onDragOver={(e) => {
+                    if (chip.fileTo !== undefined && e.dataTransfer.types.includes("cortex/article")) {
+                      e.preventDefault();
+                      setChipDrop(chip.key);
+                    }
+                  }}
+                  onDragLeave={() => setChipDrop((k) => (k === chip.key ? null : k))}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setChipDrop(null);
+                    const id = e.dataTransfer.getData("cortex/article");
+                    if (id && chip.fileTo !== undefined) void fileToCollection(id, chip.fileTo);
+                  }}
+                  className={cn(
+                    "inline-flex h-7 max-w-[11rem] items-center gap-1.5 rounded-full px-3 text-[12px] transition-colors duration-100",
+                    active
+                      ? "bg-primary text-primary-foreground shadow-sm"
+                      : "bg-muted text-foreground/75 hover:bg-accent hover:text-foreground",
+                    chipDrop === chip.key && "ring-2 ring-primary/50",
+                  )}
+                >
+                  {chip.key !== "all" && chip.key !== "unfiled" && <Icon name="folder" className="h-3 w-3 shrink-0 opacity-70" />}
+                  <span className="truncate">{chip.label}</span>
+                  <span className={cn("tabular-nums", active ? "text-primary-foreground/75" : "text-muted-foreground")}>{chip.count}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         <div className="relative mt-3">
           <Icon name="search" className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />

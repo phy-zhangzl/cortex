@@ -19,7 +19,7 @@ Cortex is built around one daily loop: follow a curated set of feeds, skim what'
 - **Feed health** — a subscription manager shows which feeds are failing, slowing down or have gone quiet.
 - **Reader** — full-text extraction for teaser feeds, one sanitized and consistent format, table of contents, adjustable font size, focus mode, reading position restore.
 - **Bilingual reading** — on demand (`T`), paragraph-by-paragraph translation through your own Ollama server, shown under each paragraph (original / bilingual / translation-only), cached locally. For single words, select and press ⌃⌘D to use the macOS dictionary.
-- **Local archive** — favoriting an article stores its full text with images inlined in the local database. Favorites survive deleting the feed or the original page going away, and can be exported as Markdown (with images) for Obsidian and similar tools.
+- **Local archive** — favoriting an article stores its full text with images inlined in the local database. Favorites survive deleting the feed or the original page going away. Organize them into collections (drag articles onto a collection, or pick one from the star button) and export as Markdown with images saved as files, one folder per collection.
 - **AI summary** — one short summary on demand, using the same Ollama model.
 
 ## Keyboard

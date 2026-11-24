@@ -3,7 +3,7 @@ mod db;
 mod models;
 mod services;
 
-use commands::{ai, articles, categories, feeds, settings, AppState};
+use commands::{ai, articles, categories, collections, feeds, settings, AppState};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,6 +31,12 @@ pub fn run() {
             categories::rename_category,
             categories::delete_category,
             categories::reorder_categories,
+            collections::list_collections,
+            collections::create_collection,
+            collections::rename_collection,
+            collections::delete_collection,
+            collections::reorder_collections,
+            collections::set_article_collection,
             feeds::list_feeds,
             feeds::discover_feed,
             feeds::create_feed,

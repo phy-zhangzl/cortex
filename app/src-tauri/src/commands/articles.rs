@@ -27,6 +27,12 @@ fn push_scope(qb: &mut QueryBuilder<'_, Sqlite>, scope: &Scope) {
         "favorites" => {
             qb.push(" AND a.is_favorite = 1");
         }
+        "collection" => {
+            qb.push(" AND a.is_favorite = 1 AND a.collection_id = ").push_bind(scope.id.clone().unwrap_or_default());
+        }
+        "unfiled" => {
+            qb.push(" AND a.is_favorite = 1 AND a.collection_id IS NULL");
+        }
         "later" => {
             qb.push(" AND a.read_later = 1");
         }
@@ -168,7 +174,7 @@ pub async fn set_favorite(state: State<'_, AppState>, article_id: String, is_fav
     let sql = if is_favorite {
         "UPDATE articles SET is_favorite = 1, updated_at = ? WHERE id = ?"
     } else {
-        "UPDATE articles SET is_favorite = 0, archived_html = NULL, archived_at = NULL, updated_at = ? WHERE id = ?"
+        "UPDATE articles SET is_favorite = 0, archived_html = NULL, archived_at = NULL, collection_id = NULL, updated_at = ? WHERE id = ?"
     };
     sqlx::query(sql)
         .bind(Utc::now())
@@ -207,8 +213,8 @@ pub async fn update_progress(state: State<'_, AppState>, article_id: String, pro
 }
 
 #[tauri::command]
-pub async fn fetch_image(state: State<'_, AppState>, url: String) -> Result<String, String> {
-    content_service::fetch_image_data_uri(&state.http, &url).await
+pub async fn fetch_image(state: State<'_, AppState>, url: String, referer: Option<String>) -> Result<String, String> {
+    content_service::fetch_image_data_uri(&state.http, &url, referer.as_deref()).await
 }
 
 /// Stores the cleaned, image-inlined HTML so the article survives the source going away.
